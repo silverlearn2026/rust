@@ -1,0 +1,135 @@
+name: Build Custom RustDesk Windows Client
+
+on:
+  workflow_dispatch:
+    inputs:
+      version: { required: true, type: string, description: RustDesk tag/branch/commit }
+      server: { required: false, type: string, description: Rendezvous/Relay server }
+      key: { required: false, type: string, description: Public key }
+      apiServer: { required: false, type: string, description: API server }
+      custom: { required: true, type: string, description: Base64 encoded custom JSON }
+      uuid: { required: true, type: string, description: Build UUID }
+      iconlink: { required: false, type: string, default: 'false' }
+      logolink: { required: false, type: string, default: 'false' }
+      appname: { required: true, type: string, default: 'RustDesk' }
+      extras: { required: true, type: string, default: '{}' }
+      filename: { required: true, type: string, default: 'rustdesk' }
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v4
+
+      - name: Checkout RustDesk
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ inputs.version }}
+          path: rustdesk
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.5'
+          channel: stable
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable
+          rustup default stable
+
+      - name: Create custom_.txt
+        shell: pwsh
+        env:
+          CUSTOM: ${{ inputs.custom }}
+        run: |
+          [IO.File]::WriteAllText("$pwd\rustdesk\custom_.txt",$env:CUSTOM,[Text.Encoding]::ASCII)
+
+      - name: Download branding
+        shell: pwsh
+        env:
+          ICONLINK: ${{ inputs.iconlink }}
+          LOGOLINK: ${{ inputs.logolink }}
+        run: |
+          if ($env:ICONLINK -and $env:ICONLINK -ne 'false') {
+            try {
+              $x=$env:ICONLINK | ConvertFrom-Json
+              Invoke-WebRequest -Uri $x.url -OutFile "$pwd\rustdesk\res\icon.png"
+            } catch { Write-Host "Icon download skipped: $($_.Exception.Message)" }
+          }
+          if ($env:LOGOLINK -and $env:LOGOLINK -ne 'false') {
+            try {
+              $x=$env:LOGOLINK | ConvertFrom-Json
+              New-Item -ItemType Directory -Force "$pwd\rustdesk\flutter\assets" | Out-Null
+              Invoke-WebRequest -Uri $x.url -OutFile "$pwd\rustdesk\flutter\assets\logo.png"
+            } catch { Write-Host "Logo download skipped: $($_.Exception.Message)" }
+          }
+
+      - name: Apply builder metadata
+        shell: pwsh
+        env:
+          SERVER: ${{ inputs.server }}
+          KEY: ${{ inputs.key }}
+          API: ${{ inputs.apiServer }}
+          APPNAME: ${{ inputs.appname }}
+          FILENAME: ${{ inputs.filename }}
+          EXTRAS: ${{ inputs.extras }}
+        run: |
+          python scripts/apply_config.py `
+            --rustdesk "$pwd\rustdesk" `
+            --server "$env:SERVER" `
+            --key "$env:KEY" `
+            --api "$env:API" `
+            --appname "$env:APPNAME" `
+            --filename "$env:FILENAME" `
+            --extras "$env:EXTRAS"
+
+      - name: Build RustDesk
+        working-directory: rustdesk
+        shell: pwsh
+        run: python build.py --portable --flutter --skip-portable-pack --hwcodec
+
+      - name: Collect executable
+        shell: pwsh
+        env:
+          FILENAME: ${{ inputs.filename }}
+        run: |
+          $src=Get-ChildItem "rustdesk\flutter\build\windows" -Filter "rustdesk.exe" -Recurse | Select-Object -First 1
+          if (-not $src) { throw "rustdesk.exe was not found" }
+          Copy-Item $src.FullName "rustdesk\$env:FILENAME.exe"
+
+      - name: Upload client
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-${{ inputs.uuid }}
+          path: rustdesk/${{ inputs.filename }}.exe
+
+      - name: Callback Laravel
+        if: always()
+        shell: pwsh
+        env:
+          CALLBACK: ${{ secrets.LARAVEL_CALLBACK_URL }}
+          SECRET: ${{ secrets.LARAVEL_CALLBACK_SECRET }}
+        run: |
+          if (-not $env:CALLBACK) { exit 0 }
+          $status=if ("${{ job.status }}" -eq "success") {"completed"} else {"failed"}
+          $body=@{
+            build_id="${{ inputs.uuid }}"
+            run_id="${{ github.run_id }}"
+            status=$status
+            log="GitHub Actions status: ${{ job.status }}"
+          } | ConvertTo-Json
+          Invoke-RestMethod -Method Post -Uri $env:CALLBACK -Headers @{
+            "X-Builder-Secret"=$env:SECRET
+            "Content-Type"="application/json"
+          } -Body $body
