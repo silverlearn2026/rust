@@ -83,9 +83,9 @@ permissions:
 
 env:
 
-  # ------------------------------------------------------------
-  # RustDesk / build versions
-  # ------------------------------------------------------------
+  # ============================================================
+  # RustDesk / Build versions
+  # ============================================================
 
   FLUTTER_VERSION: "3.24.5"
 
@@ -96,6 +96,9 @@ env:
   VCPKG_TRIPLET: "x64-windows-static"
 
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+  # Flutter Rust Bridge version used by this RustDesk generation
+  FRB_VERSION: "1.80.1"
 
 
 jobs:
@@ -154,6 +157,8 @@ jobs:
           Write-Host "API Server       : ${{ inputs.apiServer }}"
           Write-Host "Icon URL         : ${{ inputs.iconlink }}"
           Write-Host "Logo URL         : ${{ inputs.logolink }}"
+          Write-Host "Flutter          : ${{ env.FLUTTER_VERSION }}"
+          Write-Host "FRB              : ${{ env.FRB_VERSION }}"
 
           Write-Host "=============================================="
 
@@ -194,6 +199,11 @@ jobs:
 
         run: |
 
+          Write-Host "=============================================="
+          Write-Host "Flutter Environment"
+          Write-Host "=============================================="
+
+          Write-Host ""
           Write-Host "Flutter:"
           flutter --version
 
@@ -228,6 +238,10 @@ jobs:
         shell: pwsh
 
         run: |
+
+          Write-Host "=============================================="
+          Write-Host "Rust Environment"
+          Write-Host "=============================================="
 
           rustc --version
           cargo --version
@@ -271,6 +285,10 @@ jobs:
 
         run: |
 
+          Write-Host "=============================================="
+          Write-Host "vcpkg Environment"
+          Write-Host "=============================================="
+
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
 
           if (-not $env:VCPKG_ROOT) {
@@ -302,6 +320,10 @@ jobs:
 
         run: |
 
+          Write-Host "=============================================="
+          Write-Host "Installing vcpkg dependencies"
+          Write-Host "=============================================="
+
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
           Write-Host "Triplet=$env:VCPKG_DEFAULT_TRIPLET"
 
@@ -327,7 +349,9 @@ jobs:
 
         run: |
 
-          Write-Host "Installed vcpkg packages:"
+          Write-Host "=============================================="
+          Write-Host "Installed vcpkg packages"
+          Write-Host "=============================================="
 
           & "$env:VCPKG_ROOT\vcpkg.exe" list
 
@@ -363,6 +387,10 @@ jobs:
           CLIENT_EXTRAS: ${{ inputs.extras }}
 
         run: |
+
+          Write-Host "=============================================="
+          Write-Host "Creating builder configuration"
+          Write-Host "=============================================="
 
           New-Item `
             -ItemType Directory `
@@ -447,15 +475,23 @@ jobs:
       # ==========================================================
 
       - name: Apply RustDesk configuration
+
         shell: pwsh
+
         working-directory: rustdesk
 
         env:
+
           RUSTDESK_SERVER: ${{ inputs.server }}
+
           RUSTDESK_KEY: ${{ inputs.key }}
+
           RUSTDESK_API_SERVER: ${{ inputs.apiServer }}
+
           RUSTDESK_APPNAME: ${{ inputs.appname }}
+
           RUSTDESK_FILENAME: ${{ inputs.filename }}
+
           RUSTDESK_EXTRAS: ${{ inputs.extras }}
 
         run: |
@@ -463,7 +499,9 @@ jobs:
           $script = "..\scripts\apply_config.py"
 
           if (-not (Test-Path $script)) {
+
             Write-Error "apply_config.py was not found."
+
             exit 1
           }
 
@@ -474,27 +512,45 @@ jobs:
           )
 
           if ($env:RUSTDESK_SERVER) {
-            $args += @("--server", $env:RUSTDESK_SERVER)
+            $args += @(
+              "--server",
+              $env:RUSTDESK_SERVER
+            )
           }
 
           if ($env:RUSTDESK_KEY) {
-            $args += @("--key", $env:RUSTDESK_KEY)
+            $args += @(
+              "--key",
+              $env:RUSTDESK_KEY
+            )
           }
 
           if ($env:RUSTDESK_API_SERVER) {
-            $args += @("--api", $env:RUSTDESK_API_SERVER)
+            $args += @(
+              "--api",
+              $env:RUSTDESK_API_SERVER
+            )
           }
 
           if ($env:RUSTDESK_APPNAME) {
-            $args += @("--appname", $env:RUSTDESK_APPNAME)
+            $args += @(
+              "--appname",
+              $env:RUSTDESK_APPNAME
+            )
           }
 
           if ($env:RUSTDESK_FILENAME) {
-            $args += @("--filename", $env:RUSTDESK_FILENAME)
+            $args += @(
+              "--filename",
+              $env:RUSTDESK_FILENAME
+            )
           }
 
           if ($env:RUSTDESK_EXTRAS) {
-            $args += @("--extras", $env:RUSTDESK_EXTRAS)
+            $args += @(
+              "--extras",
+              $env:RUSTDESK_EXTRAS
+            )
           }
 
           Write-Host "Executing:"
@@ -503,11 +559,14 @@ jobs:
           python $script @args
 
           if ($LASTEXITCODE -ne 0) {
+
             Write-Error "apply_config.py failed."
+
             exit $LASTEXITCODE
           }
 
           Write-Host "RustDesk configuration applied successfully."
+
 
       # ==========================================================
       # 17. Inspect configuration
@@ -557,13 +616,213 @@ jobs:
 
         run: |
 
+          Write-Host "=============================================="
+          Write-Host "Flutter dependencies"
+          Write-Host "=============================================="
+
           flutter clean
 
           flutter pub get
 
+          if ($LASTEXITCODE -ne 0) {
+            throw "flutter pub get failed."
+          }
+
 
       # ==========================================================
-      # 19. Build RustDesk
+      # 19. Install Flutter Rust Bridge Code Generator
+      # ==========================================================
+
+      - name: Install Flutter Rust Bridge Codegen
+
+        shell: pwsh
+
+        working-directory: rustdesk
+
+        run: |
+
+          Write-Host "=============================================="
+          Write-Host "Flutter Rust Bridge Code Generator"
+          Write-Host "=============================================="
+
+          Write-Host ""
+          Write-Host "Installing flutter_rust_bridge_codegen..."
+
+          cargo install flutter_rust_bridge_codegen `
+            --version "${{ env.FRB_VERSION }}" `
+            --locked
+
+          if ($LASTEXITCODE -ne 0) {
+
+            Write-Error "Failed to install flutter_rust_bridge_codegen."
+
+            exit $LASTEXITCODE
+          }
+
+          Write-Host ""
+          Write-Host "Checking code generator..."
+
+          $codegen = "$env:USERPROFILE\.cargo\bin\flutter_rust_bridge_codegen.exe"
+
+          if (-not (Test-Path $codegen)) {
+
+            throw "flutter_rust_bridge_codegen.exe was not found at $codegen"
+          }
+
+          & $codegen --version
+
+          if ($LASTEXITCODE -ne 0) {
+
+            throw "flutter_rust_bridge_codegen --version failed."
+          }
+
+          Write-Host ""
+          Write-Host "Flutter Rust Bridge Codegen installed successfully."
+
+
+      # ==========================================================
+      # 20. Generate Flutter Rust Bridge
+      # ==========================================================
+
+      - name: Generate Flutter Rust Bridge
+
+        shell: pwsh
+
+        working-directory: rustdesk
+
+        run: |
+
+          Write-Host "=============================================="
+          Write-Host "Generating Flutter Rust Bridge"
+          Write-Host "=============================================="
+
+          $codegen = "$env:USERPROFILE\.cargo\bin\flutter_rust_bridge_codegen.exe"
+
+          if (-not (Test-Path $codegen)) {
+
+            throw "flutter_rust_bridge_codegen.exe not found."
+          }
+
+          Write-Host ""
+          Write-Host "Rust input:"
+          Write-Host ".\src\flutter_ffi.rs"
+
+          if (-not (Test-Path ".\src\flutter_ffi.rs")) {
+
+            throw "src\flutter_ffi.rs not found."
+          }
+
+          Write-Host ""
+          Write-Host "Running Flutter Rust Bridge generator..."
+
+          & $codegen `
+            --rust-input ".\src\flutter_ffi.rs" `
+            --dart-output ".\flutter\lib\generated_bridge.dart" `
+            --c-output ".\flutter\macos\Runner\bridge_generated.h"
+
+          if ($LASTEXITCODE -ne 0) {
+
+            Write-Error "Flutter Rust Bridge generation failed."
+
+            exit $LASTEXITCODE
+          }
+
+          Write-Host ""
+          Write-Host "Checking generated bridge files..."
+
+          Write-Host ""
+          Write-Host "src directory:"
+
+          Get-ChildItem ".\src" -Filter "*bridge*" -ErrorAction SilentlyContinue |
+            Select-Object FullName
+
+
+          Write-Host ""
+          Write-Host "flutter/lib directory:"
+
+          Get-ChildItem ".\flutter\lib" -Filter "*bridge*" -ErrorAction SilentlyContinue |
+            Select-Object FullName
+
+
+      # ==========================================================
+      # 21. Verify generated bridge
+      # ==========================================================
+
+      - name: Verify Flutter Rust Bridge
+
+        shell: pwsh
+
+        working-directory: rustdesk
+
+        run: |
+
+          Write-Host "=============================================="
+          Write-Host "Verifying generated Flutter Rust Bridge"
+          Write-Host "=============================================="
+
+
+          $requiredFiles = @(
+            ".\src\bridge_generated.rs",
+            ".\src\bridge_generated.io.rs",
+            ".\flutter\lib\generated_bridge.dart"
+          )
+
+
+          $failed = $false
+
+
+          foreach ($file in $requiredFiles) {
+
+            if (Test-Path $file) {
+
+              $item = Get-Item $file
+
+              Write-Host "FOUND:"
+              Write-Host "  $file"
+              Write-Host "  Size: $($item.Length) bytes"
+              Write-Host ""
+
+            }
+
+            else {
+
+              Write-Error "MISSING:"
+              Write-Error "  $file"
+
+              $failed = $true
+            }
+          }
+
+
+          if ($failed) {
+
+            Write-Host ""
+            Write-Host "=============================================="
+            Write-Host "Flutter Rust Bridge generation FAILED"
+            Write-Host "=============================================="
+
+            Write-Host ""
+            Write-Host "src bridge files:"
+
+            Get-ChildItem ".\src" -Filter "*bridge*" -ErrorAction SilentlyContinue
+
+
+            Write-Host ""
+            Write-Host "flutter bridge files:"
+
+            Get-ChildItem ".\flutter\lib" -Filter "*bridge*" -ErrorAction SilentlyContinue
+
+
+            exit 1
+          }
+
+
+          Write-Host ""
+          Write-Host "Flutter Rust Bridge verification successful."
+
+
+      # ==========================================================
+      # 22. Build RustDesk
       # ==========================================================
 
       - name: Build RustDesk
@@ -610,6 +869,16 @@ jobs:
           python --version
 
           Write-Host ""
+          Write-Host "Bridge:"
+          
+          if (Test-Path ".\src\bridge_generated.rs") {
+            Write-Host "bridge_generated.rs FOUND"
+          }
+          else {
+            throw "bridge_generated.rs is missing before build."
+          }
+
+          Write-Host ""
           Write-Host "Starting RustDesk build..."
 
 
@@ -630,9 +899,12 @@ jobs:
             exit $LASTEXITCODE
           }
 
+          Write-Host ""
+          Write-Host "RustDesk build completed successfully."
+
 
       # ==========================================================
-      # 20. Find generated EXE
+      # 23. Find generated EXE
       # ==========================================================
 
       - name: Find generated executable
@@ -643,7 +915,9 @@ jobs:
 
         run: |
 
-          Write-Host "Searching for RustDesk executable..."
+          Write-Host "=============================================="
+          Write-Host "Searching for RustDesk executable"
+          Write-Host "=============================================="
 
           $files = Get-ChildItem `
             -Path "." `
@@ -673,7 +947,7 @@ jobs:
 
 
       # ==========================================================
-      # 21. Prepare Release
+      # 24. Prepare Release
       # ==========================================================
 
       - name: Prepare Release
@@ -687,6 +961,11 @@ jobs:
           OUTPUT_FILENAME: ${{ inputs.filename }}
 
         run: |
+
+          Write-Host "=============================================="
+          Write-Host "Preparing Release"
+          Write-Host "=============================================="
+
 
           New-Item `
             -ItemType Directory `
@@ -715,12 +994,15 @@ jobs:
 
           $outputName = $env:OUTPUT_FILENAME
 
+
           if (-not $outputName) {
+
             $outputName = "RustDesk.exe"
           }
 
 
           if (-not $outputName.EndsWith(".exe")) {
+
             $outputName += ".exe"
           }
 
@@ -737,7 +1019,7 @@ jobs:
 
 
       # ==========================================================
-      # 22. Build metadata
+      # 25. Build metadata
       # ==========================================================
 
       - name: Create build metadata
@@ -776,6 +1058,9 @@ jobs:
           Flutter:
           ${{ env.FLUTTER_VERSION }}
 
+          Flutter Rust Bridge:
+          ${{ env.FRB_VERSION }}
+
           VCPKG:
           ${{ env.VCPKG_COMMIT_ID }}
 
@@ -788,7 +1073,7 @@ jobs:
 
 
       # ==========================================================
-      # 23. Upload artifact
+      # 26. Upload artifact
       # ==========================================================
 
       - name: Upload Windows client
@@ -811,7 +1096,7 @@ jobs:
 
 
       # ==========================================================
-      # 24. Summary
+      # 27. Summary
       # ==========================================================
 
       - name: Build summary
@@ -833,6 +1118,7 @@ jobs:
           Write-Host "Filename     : ${{ inputs.filename }}"
           Write-Host "Architecture : x64"
           Write-Host "Flutter      : ${{ env.FLUTTER_VERSION }}"
+          Write-Host "FRB          : ${{ env.FRB_VERSION }}"
           Write-Host "VCPKG        : ${{ env.VCPKG_COMMIT_ID }}"
 
           Write-Host "=============================================="
