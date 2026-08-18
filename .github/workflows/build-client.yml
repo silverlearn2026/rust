@@ -3,6 +3,7 @@ name: Build Custom RustDesk Windows Client
 on:
   workflow_dispatch:
     inputs:
+
       version:
         description: "RustDesk tag / branch / commit"
         required: true
@@ -22,19 +23,55 @@ on:
         default: ""
 
       apiServer:
-        description: "API server"
+        description: "RustDesk API server"
         required: false
         type: string
         default: ""
 
       custom:
-        description: "Base64 encoded custom configuration"
+        description: "Base64 encoded RustDesk custom configuration"
+        required: false
+        type: string
+        default: ""
+
+      uuid:
+        description: "Client UUID"
+        required: false
+        type: string
+        default: ""
+
+      iconlink:
+        description: "Client icon URL"
+        required: false
+        type: string
+        default: ""
+
+      logolink:
+        description: "Client logo URL"
+        required: false
+        type: string
+        default: ""
+
+      appname:
+        description: "Application name"
+        required: false
+        type: string
+        default: "RustDesk"
+
+      filename:
+        description: "Output executable filename"
+        required: false
+        type: string
+        default: "RustDesk.exe"
+
+      extras:
+        description: "Additional client configuration"
         required: false
         type: string
         default: ""
 
       upload_artifact:
-        description: "Upload build artifact"
+        description: "Upload generated Windows client"
         required: false
         type: boolean
         default: true
@@ -45,23 +82,20 @@ permissions:
 
 
 env:
-  # RustDesk build versions
+
+  # ------------------------------------------------------------
+  # RustDesk / build versions
+  # ------------------------------------------------------------
+
   FLUTTER_VERSION: "3.24.5"
 
-  # Rust version compatible with the RustDesk source
   RUST_VERSION: "stable"
 
-  # Official RustDesk vcpkg baseline currently used by their CI
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
 
-  # Enable GitHub Actions vcpkg binary cache
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-
-  # Build target
   VCPKG_TRIPLET: "x64-windows-static"
 
-  # RustDesk features
-  RUSTDESK_FEATURES: "flutter,hwcodec"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
 
 jobs:
@@ -74,19 +108,21 @@ jobs:
 
     steps:
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # 1. Checkout builder repository
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Checkout builder repository
+
         uses: actions/checkout@v4
 
 
-      # ------------------------------------------------------------
-      # 2. Checkout RustDesk source
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 2. Checkout RustDesk
+      # ==========================================================
 
       - name: Checkout RustDesk
+
         uses: actions/checkout@v4
 
         with:
@@ -96,62 +132,86 @@ jobs:
           submodules: recursive
 
 
-      # ------------------------------------------------------------
-      # 3. Show selected version
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 3. Display build information
+      # ==========================================================
 
-      - name: Show build information
+      - name: Display build information
+
         shell: pwsh
+
         run: |
-          Write-Host "=========================================="
-          Write-Host "RustDesk Custom Client Build"
-          Write-Host "=========================================="
-          Write-Host "RustDesk version: ${{ inputs.version }}"
-          Write-Host "Server:           ${{ inputs.server }}"
-          Write-Host "API Server:       ${{ inputs.apiServer }}"
-          Write-Host "VCPKG triplet:    $env:VCPKG_TRIPLET"
-          Write-Host "=========================================="
+
+          Write-Host "=============================================="
+          Write-Host "       RustDesk Custom Windows Builder"
+          Write-Host "=============================================="
+
+          Write-Host "RustDesk version : ${{ inputs.version }}"
+          Write-Host "Application      : ${{ inputs.appname }}"
+          Write-Host "Filename         : ${{ inputs.filename }}"
+          Write-Host "UUID             : ${{ inputs.uuid }}"
+          Write-Host "Server           : ${{ inputs.server }}"
+          Write-Host "API Server       : ${{ inputs.apiServer }}"
+          Write-Host "Icon URL         : ${{ inputs.iconlink }}"
+          Write-Host "Logo URL         : ${{ inputs.logolink }}"
+
+          Write-Host "=============================================="
 
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # 4. Setup Python
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Setup Python
+
         uses: actions/setup-python@v5
+
         with:
           python-version: "3.11"
 
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # 5. Setup Flutter
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Setup Flutter
+
         uses: subosito/flutter-action@v2
+
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
 
 
-      # ------------------------------------------------------------
-      # 6. Flutter information
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 6. Verify Flutter
+      # ==========================================================
 
       - name: Verify Flutter
+
         shell: pwsh
+
         run: |
+
+          Write-Host "Flutter:"
           flutter --version
+
+          Write-Host ""
+          Write-Host "Dart:"
           dart --version
+
+          Write-Host ""
+          Write-Host "Flutter Doctor:"
           flutter doctor -v
 
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # 7. Setup Rust
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Setup Rust
+
         uses: dtolnay/rust-toolchain@stable
 
         with:
@@ -159,23 +219,27 @@ jobs:
           target: x86_64-pc-windows-msvc
 
 
-      # ------------------------------------------------------------
-      # 8. Rust information
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 8. Verify Rust
+      # ==========================================================
 
       - name: Verify Rust
+
         shell: pwsh
+
         run: |
+
           rustc --version
           cargo --version
           rustup show
 
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # 9. Rust cache
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Rust cache
+
         uses: Swatinem/rust-cache@v2
 
         with:
@@ -183,31 +247,30 @@ jobs:
             rustdesk
 
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # 10. Setup vcpkg
-      #
-      # IMPORTANT:
-      # RustDesk hwcodec expects VCPKG_ROOT.
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Setup vcpkg
+
         uses: lukka/run-vcpkg@v11
 
         with:
           vcpkgDirectory: C:\vcpkg
-
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-
           doNotCache: false
 
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # 11. Verify vcpkg
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Verify vcpkg
+
         shell: pwsh
+
         run: |
+
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
 
           if (-not $env:VCPKG_ROOT) {
@@ -215,31 +278,32 @@ jobs:
           }
 
           if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
-            throw "vcpkg.exe was not found."
+            throw "vcpkg.exe not found."
           }
 
           & "$env:VCPKG_ROOT\vcpkg.exe" version
 
 
-      # ------------------------------------------------------------
-      # 12. Install RustDesk vcpkg dependencies
-      #
-      # RustDesk officially installs dependencies through
-      # the project's vcpkg.json manifest.
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 12. Install vcpkg dependencies
+      # ==========================================================
 
       - name: Install vcpkg dependencies
+
         shell: pwsh
+
         working-directory: rustdesk
 
         env:
+
           VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_TRIPLET }}
+
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
 
         run: |
 
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
-          Write-Host "VCPKG_DEFAULT_TRIPLET=$env:VCPKG_DEFAULT_TRIPLET"
+          Write-Host "Triplet=$env:VCPKG_DEFAULT_TRIPLET"
 
           & "$env:VCPKG_ROOT\vcpkg.exe" install `
             --triplet "${{ env.VCPKG_TRIPLET }}" `
@@ -247,207 +311,236 @@ jobs:
 
           if ($LASTEXITCODE -ne 0) {
 
-            Write-Host ""
-            Write-Host "=========================================="
-            Write-Host "vcpkg installation failed"
-            Write-Host "=========================================="
-
-            Get-ChildItem `
-              "$env:VCPKG_ROOT" `
-              -Recurse `
-              -Filter "*.log" `
-              -ErrorAction SilentlyContinue |
-              ForEach-Object {
-
-                Write-Host ""
-                Write-Host "LOG: $($_.FullName)"
-                Write-Host "------------------------------------------"
-
-                Get-Content $_.FullName -Tail 200
-              }
+            Write-Host "vcpkg installation failed."
 
             exit $LASTEXITCODE
           }
 
 
-      # ------------------------------------------------------------
-      # 13. Verify installed vcpkg libraries
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 13. Verify vcpkg packages
+      # ==========================================================
 
-      - name: Verify vcpkg libraries
+      - name: Verify vcpkg packages
+
         shell: pwsh
+
         run: |
 
-          Write-Host "Checking vcpkg installation..."
-
-          $tripletPath = "$env:VCPKG_ROOT\installed\${{ env.VCPKG_TRIPLET }}"
-
-          if (-not (Test-Path $tripletPath)) {
-            throw "vcpkg triplet installation directory not found: $tripletPath"
-          }
-
-          Write-Host ""
-          Write-Host "Installed libraries:"
-          Write-Host "------------------------------------------"
-
-          Get-ChildItem "$tripletPath\lib" -ErrorAction SilentlyContinue |
-            Select-Object Name |
-            Format-Table -AutoSize
-
-          Write-Host ""
-          Write-Host "Installed packages:"
-          Write-Host "------------------------------------------"
+          Write-Host "Installed vcpkg packages:"
 
           & "$env:VCPKG_ROOT\vcpkg.exe" list
 
 
-      # ------------------------------------------------------------
-      # 14. Prepare RustDesk configuration
-      #
-      # The values are passed as environment variables so the
-      # configuration script can consume them.
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 14. Create builder configuration
+      # ==========================================================
 
-      - name: Prepare custom configuration
+      - name: Create builder configuration
+
         shell: pwsh
+
         working-directory: rustdesk
 
         env:
-          RUSTDESK_SERVER: ${{ inputs.server }}
-          RUSTDESK_KEY: ${{ inputs.key }}
-          RUSTDESK_API_SERVER: ${{ inputs.apiServer }}
-          RUSTDESK_CUSTOM: ${{ inputs.custom }}
+
+          CLIENT_SERVER: ${{ inputs.server }}
+
+          CLIENT_KEY: ${{ inputs.key }}
+
+          CLIENT_API_SERVER: ${{ inputs.apiServer }}
+
+          CLIENT_UUID: ${{ inputs.uuid }}
+
+          CLIENT_ICON: ${{ inputs.iconlink }}
+
+          CLIENT_LOGO: ${{ inputs.logolink }}
+
+          CLIENT_APPNAME: ${{ inputs.appname }}
+
+          CLIENT_FILENAME: ${{ inputs.filename }}
+
+          CLIENT_EXTRAS: ${{ inputs.extras }}
 
         run: |
 
-          Write-Host "Preparing RustDesk configuration..."
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path ".\res" |
+            Out-Null
 
-          $configDir = ".\res"
-
-          if (-not (Test-Path $configDir)) {
-            New-Item -ItemType Directory -Force $configDir | Out-Null
-          }
-
-          # Save builder metadata.
-          #
-          # This file is intentionally simple and can be consumed
-          # by apply_config.py later.
 
           @"
           {
-            "server": "$($env:RUSTDESK_SERVER)",
-            "key": "$($env:RUSTDESK_KEY)",
-            "apiServer": "$($env:RUSTDESK_API_SERVER)"
+            "uuid": "$env:CLIENT_UUID",
+            "server": "$env:CLIENT_SERVER",
+            "key": "$env:CLIENT_KEY",
+            "apiServer": "$env:CLIENT_API_SERVER",
+            "iconlink": "$env:CLIENT_ICON",
+            "logolink": "$env:CLIENT_LOGO",
+            "appname": "$env:CLIENT_APPNAME",
+            "filename": "$env:CLIENT_FILENAME",
+            "extras": "$env:CLIENT_EXTRAS"
           }
           "@ | Set-Content `
-              -Path ".\res\builder-config.json" `
-              -Encoding UTF8
+            -Path ".\res\builder-config.json" `
+            -Encoding UTF8
 
-          # If Laravel supplied a Base64 configuration,
-          # decode it into custom_.txt.
 
-          if ($env:RUSTDESK_CUSTOM) {
+          Write-Host "builder-config.json created."
+
+
+      # ==========================================================
+      # 15. Create custom_.txt
+      # ==========================================================
+
+      - name: Create custom configuration
+
+        shell: pwsh
+
+        working-directory: rustdesk
+
+        env:
+
+          CUSTOM_CONFIG: ${{ inputs.custom }}
+
+        run: |
+
+          if ($env:CUSTOM_CONFIG) {
+
+            Write-Host "Decoding custom configuration..."
 
             try {
 
-              $bytes = [System.Convert]::FromBase64String(
-                $env:RUSTDESK_CUSTOM
+              $bytes = [Convert]::FromBase64String(
+                $env:CUSTOM_CONFIG
               )
 
-              [System.IO.File]::WriteAllBytes(
+              [IO.File]::WriteAllBytes(
                 "$PWD\res\custom_.txt",
                 $bytes
               )
 
-              Write-Host "custom_.txt created successfully."
+              Write-Host "custom_.txt created."
 
             }
+
             catch {
 
-              Write-Warning "custom input is not valid Base64."
-              Write-Warning $_
+              Write-Error "Invalid Base64 custom configuration."
+
+              throw
             }
 
           }
+
           else {
 
-            Write-Host "No custom Base64 configuration supplied."
+            Write-Host "No custom configuration supplied."
 
           }
 
 
-      # ------------------------------------------------------------
-      # 15. Apply custom configuration if script exists
-      #
-      # This prevents the workflow from failing just because
-      # apply_config.py is not present.
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 16. Apply configuration script
+      # ==========================================================
 
-      - name: Apply custom configuration
+      - name: Apply RustDesk configuration
+
         shell: pwsh
+
         working-directory: rustdesk
 
         env:
+
           RUSTDESK_SERVER: ${{ inputs.server }}
+
           RUSTDESK_KEY: ${{ inputs.key }}
+
           RUSTDESK_API_SERVER: ${{ inputs.apiServer }}
+
+          RUSTDESK_UUID: ${{ inputs.uuid }}
+
+          RUSTDESK_ICONLINK: ${{ inputs.iconlink }}
+
+          RUSTDESK_LOGOLINK: ${{ inputs.logolink }}
+
+          RUSTDESK_APPNAME: ${{ inputs.appname }}
+
+          RUSTDESK_FILENAME: ${{ inputs.filename }}
+
+          RUSTDESK_EXTRAS: ${{ inputs.extras }}
 
         run: |
 
-          if (Test-Path ".\..\scripts\apply_config.py") {
+          $script = "..\scripts\apply_config.py"
 
-            Write-Host "Found builder configuration script."
+          if (Test-Path $script) {
 
-            python ..\scripts\apply_config.py
+            Write-Host "Running apply_config.py..."
+
+            python $script
+
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
 
           }
+
           else {
 
-            Write-Host ""
-            Write-Host "=========================================="
-            Write-Host "apply_config.py not found."
-            Write-Host "Skipping Python configuration patch."
-            Write-Host "=========================================="
-            Write-Host ""
+            Write-Warning "scripts/apply_config.py was not found."
+
+            Write-Warning "Skipping configuration patch."
 
           }
 
 
-      # ------------------------------------------------------------
-      # 16. Show final RustDesk configuration files
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 17. Inspect configuration
+      # ==========================================================
 
       - name: Inspect configuration
+
         shell: pwsh
+
         working-directory: rustdesk
 
         run: |
 
-          Write-Host "RustDesk configuration files:"
-          Write-Host "=========================================="
+          Write-Host "=============================================="
+          Write-Host "Configuration files"
+          Write-Host "=============================================="
+
 
           if (Test-Path ".\res\builder-config.json") {
 
             Get-Content ".\res\builder-config.json"
           }
 
+
           if (Test-Path ".\res\custom_.txt") {
 
             Write-Host ""
             Write-Host "custom_.txt exists."
 
-            $size = (Get-Item ".\res\custom_.txt").Length
+            $size = (
+              Get-Item ".\res\custom_.txt"
+            ).Length
 
-            Write-Host "custom_.txt size: $size bytes"
+            Write-Host "Size: $size bytes"
           }
 
 
-      # ------------------------------------------------------------
-      # 17. Flutter dependencies
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 18. Flutter dependencies
+      # ==========================================================
 
       - name: Flutter pub get
+
         shell: pwsh
+
         working-directory: rustdesk\flutter
 
         run: |
@@ -457,59 +550,39 @@ jobs:
           flutter pub get
 
 
-      # ------------------------------------------------------------
-      # 18. Verify C++ build environment
-      # ------------------------------------------------------------
-
-      - name: Verify MSVC
-        shell: pwsh
-        run: |
-
-          Write-Host "Searching for Visual Studio..."
-
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-
-          if (Test-Path $vswhere) {
-
-            & $vswhere `
-              -latest `
-              -products * `
-              -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-              -property installationPath
-
-          }
-          else {
-
-            Write-Warning "vswhere.exe not found."
-
-          }
-
-
-      # ------------------------------------------------------------
+      # ==========================================================
       # 19. Build RustDesk
-      #
-      # IMPORTANT:
-      # VCPKG_ROOT is explicitly passed to the build environment.
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Build RustDesk
+
         id: build
+
         shell: pwsh
+
         working-directory: rustdesk
 
         env:
+
           VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+
           VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_TRIPLET }}
+
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
 
         run: |
 
-          Write-Host "=========================================="
+          Write-Host "=============================================="
           Write-Host "Building RustDesk"
-          Write-Host "=========================================="
+          Write-Host "=============================================="
 
-          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
-          Write-Host "VCPKG_DEFAULT_TRIPLET=$env:VCPKG_DEFAULT_TRIPLET"
+          Write-Host ""
+          Write-Host "VCPKG_ROOT:"
+          Write-Host $env:VCPKG_ROOT
+
+          Write-Host ""
+          Write-Host "VCPKG Triplet:"
+          Write-Host $env:VCPKG_DEFAULT_TRIPLET
 
           Write-Host ""
           Write-Host "Rust:"
@@ -525,7 +598,8 @@ jobs:
           python --version
 
           Write-Host ""
-          Write-Host "Starting build..."
+          Write-Host "Starting RustDesk build..."
+
 
           python build.py `
             --portable `
@@ -533,23 +607,26 @@ jobs:
             --skip-portable-pack `
             --hwcodec
 
+
           if ($LASTEXITCODE -ne 0) {
 
             Write-Host ""
-            Write-Host "=========================================="
-            Write-Host "RustDesk BUILD FAILED"
-            Write-Host "=========================================="
+            Write-Host "=============================================="
+            Write-Host "RUSTDESK BUILD FAILED"
+            Write-Host "=============================================="
 
             exit $LASTEXITCODE
           }
 
 
-      # ------------------------------------------------------------
-      # 20. Locate generated files
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 20. Find generated EXE
+      # ==========================================================
 
-      - name: Locate build output
+      - name: Find generated executable
+
         shell: pwsh
+
         working-directory: rustdesk
 
         run: |
@@ -563,6 +640,7 @@ jobs:
             -File `
             -ErrorAction SilentlyContinue
 
+
           if (-not $files) {
 
             Write-Error "RustDesk executable was not found."
@@ -570,23 +648,31 @@ jobs:
             exit 1
           }
 
+
           foreach ($file in $files) {
 
             Write-Host ""
             Write-Host "FOUND:"
             Write-Host $file.FullName
-            Write-Host "SIZE: $($file.Length) bytes"
 
+            Write-Host "SIZE:"
+            Write-Host "$($file.Length) bytes"
           }
 
 
-      # ------------------------------------------------------------
-      # 21. Prepare artifact
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 21. Prepare Release
+      # ==========================================================
 
-      - name: Prepare artifact
+      - name: Prepare Release
+
         shell: pwsh
+
         working-directory: rustdesk
+
+        env:
+
+          OUTPUT_FILENAME: ${{ inputs.filename }}
 
         run: |
 
@@ -596,47 +682,75 @@ jobs:
             -Path ".\Release" |
             Out-Null
 
+
           $exe = Get-ChildItem `
             -Path "." `
             -Recurse `
             -Include "rustdesk.exe","RustDesk.exe" `
             -File `
-            | Where-Object {
-                $_.FullName -notmatch "\\target\\debug\\"
-              } `
-            | Select-Object -First 1
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.FullName -notmatch "\\target\\debug\\"
+            } |
+            Select-Object -First 1
+
 
           if (-not $exe) {
 
             throw "RustDesk executable not found."
           }
 
+
+          $outputName = $env:OUTPUT_FILENAME
+
+          if (-not $outputName) {
+            $outputName = "RustDesk.exe"
+          }
+
+
+          if (-not $outputName.EndsWith(".exe")) {
+            $outputName += ".exe"
+          }
+
+
           Copy-Item `
             $exe.FullName `
-            ".\Release\RustDesk.exe" `
+            ".\Release\$outputName" `
             -Force
 
-          Write-Host "Artifact prepared:"
-          Get-Item ".\Release\RustDesk.exe" |
-            Select-Object Name,Length,FullName
+
+          Write-Host ""
+          Write-Host "Final executable:"
+          Write-Host ".\Release\$outputName"
 
 
-      # ------------------------------------------------------------
-      # 22. Create build information
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 22. Build metadata
+      # ==========================================================
 
       - name: Create build metadata
+
         shell: pwsh
+
         working-directory: rustdesk
 
         run: |
 
           @"
-          RustDesk Custom Client
-          ======================
+          RustDesk Custom Windows Client
+          ==================================
 
           Version:
           ${{ inputs.version }}
+
+          Application:
+          ${{ inputs.appname }}
+
+          Filename:
+          ${{ inputs.filename }}
+
+          UUID:
+          ${{ inputs.uuid }}
 
           Server:
           ${{ inputs.server }}
@@ -653,28 +767,30 @@ jobs:
           VCPKG:
           ${{ env.VCPKG_COMMIT_ID }}
 
-          Build:
-          GitHub Actions
+          GitHub Run:
+          ${{ github.run_number }}
 
           "@ | Set-Content `
-              ".\Release\build-info.txt" `
-              -Encoding UTF8
+            ".\Release\build-info.txt" `
+            -Encoding UTF8
 
 
-      # ------------------------------------------------------------
+      # ==========================================================
       # 23. Upload artifact
-      # ------------------------------------------------------------
+      # ==========================================================
 
       - name: Upload Windows client
+
         if: ${{ inputs.upload_artifact }}
 
         uses: actions/upload-artifact@v4
 
         with:
+
           name: rustdesk-windows-x64-${{ github.run_number }}
 
           path: |
-            rustdesk/Release/RustDesk.exe
+            rustdesk/Release/*.exe
             rustdesk/Release/build-info.txt
 
           if-no-files-found: error
@@ -682,24 +798,29 @@ jobs:
           retention-days: 7
 
 
-      # ------------------------------------------------------------
-      # 24. Build summary
-      # ------------------------------------------------------------
+      # ==========================================================
+      # 24. Summary
+      # ==========================================================
 
       - name: Build summary
+
         if: always()
+
         shell: pwsh
+
         run: |
 
           Write-Host ""
-          Write-Host "=========================================="
+          Write-Host "=============================================="
           Write-Host "BUILD SUMMARY"
-          Write-Host "=========================================="
+          Write-Host "=============================================="
 
-          Write-Host "RustDesk version : ${{ inputs.version }}"
-          Write-Host "Architecture     : x64"
-          Write-Host "Flutter          : ${{ env.FLUTTER_VERSION }}"
-          Write-Host "VCPKG            : ${{ env.VCPKG_COMMIT_ID }}"
-          Write-Host "Result           : ${{ job.status }}"
+          Write-Host "Status       : ${{ job.status }}"
+          Write-Host "Version      : ${{ inputs.version }}"
+          Write-Host "Application  : ${{ inputs.appname }}"
+          Write-Host "Filename     : ${{ inputs.filename }}"
+          Write-Host "Architecture : x64"
+          Write-Host "Flutter      : ${{ env.FLUTTER_VERSION }}"
+          Write-Host "VCPKG        : ${{ env.VCPKG_COMMIT_ID }}"
 
-          Write-Host "=========================================="
+          Write-Host "=============================================="
