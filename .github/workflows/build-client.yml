@@ -447,55 +447,67 @@ jobs:
       # ==========================================================
 
       - name: Apply RustDesk configuration
-
         shell: pwsh
-
         working-directory: rustdesk
 
         env:
-
           RUSTDESK_SERVER: ${{ inputs.server }}
-
           RUSTDESK_KEY: ${{ inputs.key }}
-
           RUSTDESK_API_SERVER: ${{ inputs.apiServer }}
-
-          RUSTDESK_UUID: ${{ inputs.uuid }}
-
-          RUSTDESK_ICONLINK: ${{ inputs.iconlink }}
-
-          RUSTDESK_LOGOLINK: ${{ inputs.logolink }}
-
           RUSTDESK_APPNAME: ${{ inputs.appname }}
-
           RUSTDESK_FILENAME: ${{ inputs.filename }}
-
           RUSTDESK_EXTRAS: ${{ inputs.extras }}
 
         run: |
 
           $script = "..\scripts\apply_config.py"
 
-          if (Test-Path $script) {
-
-            Write-Host "Running apply_config.py..."
-
-            python $script
-
-            if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-            }
-
+          if (-not (Test-Path $script)) {
+            Write-Error "apply_config.py was not found."
+            exit 1
           }
 
-          else {
+          Write-Host "Running apply_config.py..."
 
-            Write-Warning "scripts/apply_config.py was not found."
+          $args = @(
+            "--rustdesk", "$PWD"
+          )
 
-            Write-Warning "Skipping configuration patch."
-
+          if ($env:RUSTDESK_SERVER) {
+            $args += @("--server", $env:RUSTDESK_SERVER)
           }
 
+          if ($env:RUSTDESK_KEY) {
+            $args += @("--key", $env:RUSTDESK_KEY)
+          }
+
+          if ($env:RUSTDESK_API_SERVER) {
+            $args += @("--api", $env:RUSTDESK_API_SERVER)
+          }
+
+          if ($env:RUSTDESK_APPNAME) {
+            $args += @("--appname", $env:RUSTDESK_APPNAME)
+          }
+
+          if ($env:RUSTDESK_FILENAME) {
+            $args += @("--filename", $env:RUSTDESK_FILENAME)
+          }
+
+          if ($env:RUSTDESK_EXTRAS) {
+            $args += @("--extras", $env:RUSTDESK_EXTRAS)
+          }
+
+          Write-Host "Executing:"
+          Write-Host "python $script $($args -join ' ')"
+
+          python $script @args
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "apply_config.py failed."
+            exit $LASTEXITCODE
+          }
+
+          Write-Host "RustDesk configuration applied successfully."
 
       # ==========================================================
       # 17. Inspect configuration
