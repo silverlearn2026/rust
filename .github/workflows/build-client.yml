@@ -904,10 +904,10 @@ jobs:
 
 
       # ==========================================================
-      # 23. Find generated EXE
+      # 23. Verify generated Windows runtime
       # ==========================================================
 
-      - name: Find generated executable
+      - name: Verify generated Windows runtime
 
         shell: pwsh
 
@@ -916,106 +916,170 @@ jobs:
         run: |
 
           Write-Host "=============================================="
-          Write-Host "Searching for RustDesk executable"
+          Write-Host "Verifying RustDesk Windows runtime"
           Write-Host "=============================================="
 
-          $files = Get-ChildItem `
-            -Path "." `
-            -Recurse `
-            -Include "rustdesk.exe","RustDesk.exe" `
-            -File `
-            -ErrorAction SilentlyContinue
+          $runtimeDir = Join-Path $PWD "flutter\build\windows\x64\runner\Release"
 
-
-          if (-not $files) {
-
-            Write-Error "RustDesk executable was not found."
-
-            exit 1
+          if (-not (Test-Path $runtimeDir)) {
+            throw "Flutter Windows Release directory was not found: $runtimeDir"
           }
 
+          $runtimeExe = Join-Path $runtimeDir "rustdesk.exe"
 
-          foreach ($file in $files) {
-
-            Write-Host ""
-            Write-Host "FOUND:"
-            Write-Host $file.FullName
-
-            Write-Host "SIZE:"
-            Write-Host "$($file.Length) bytes"
+          if (-not (Test-Path $runtimeExe)) {
+            throw "rustdesk.exe was not found: $runtimeExe"
           }
+
+          Write-Host "Runtime directory:"
+          Write-Host $runtimeDir
+          Write-Host ""
+          Write-Host "Executable:"
+          Write-Host $runtimeExe
+
+          $required = @(
+            "flutter_windows.dll",
+            "desktop_multi_window_plugin.dll"
+          )
+
+          foreach ($file in $required) {
+            $path = Join-Path $runtimeDir $file
+
+            if (Test-Path $path) {
+              $item = Get-Item $path
+              Write-Host "FOUND: $file ($($item.Length) bytes)"
+            }
+            else {
+              Write-Warning "Runtime file not found: $file"
+            }
+          }
+
+          $dataDir = Join-Path $runtimeDir "data"
+
+          if (Test-Path $dataDir) {
+            Write-Host "FOUND: data directory"
+          }
+          else {
+            throw "Flutter data directory was not found: $dataDir"
+          }
+
+          Write-Host ""
+          Write-Host "Runtime verification completed."
 
 
       # ==========================================================
-      # 24. Prepare Release
+      # 24. Build single-file self-extracted Windows executable
       # ==========================================================
 
-      - name: Prepare Release
+      - name: Build single-file portable executable
 
         shell: pwsh
 
         working-directory: rustdesk
 
         env:
-
           OUTPUT_FILENAME: ${{ inputs.filename }}
 
         run: |
 
           Write-Host "=============================================="
-          Write-Host "Preparing Release"
+          Write-Host "Building single-file portable executable"
           Write-Host "=============================================="
 
+          $runtimeDir = Join-Path $PWD "flutter\build\windows\x64\runner\Release"
+          $runtimeExe = Join-Path $runtimeDir "rustdesk.exe"
+          $portableDir = Join-Path $PWD "libs\portable"
+
+          if (-not (Test-Path $runtimeExe)) {
+            throw "RustDesk runtime executable was not found: $runtimeExe"
+          }
+
+          if (-not (Test-Path $portableDir)) {
+            throw "RustDesk portable packer directory was not found: $portableDir"
+          }
+
+          # Remove previous packer output so an old executable can never
+          # accidentally be published.
+          $oldPacker = Join-Path $PWD "target\release\rustdesk-portable-packer.exe"
+          if (Test-Path $oldPacker) {
+            Remove-Item $oldPacker -Force
+          }
+
+          Push-Location $portableDir
+
+          try {
+
+            Write-Host "Installing portable packer dependencies..."
+
+            python -m pip install -r requirements.txt
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to install portable packer dependencies."
+            }
+
+            Write-Host ""
+            Write-Host "Packing runtime:"
+            Write-Host $runtimeDir
+
+            python .\generate.py `
+              -f "../../flutter/build/windows/x64/runner/Release" `
+              -o "." `
+              -e "../../flutter/build/windows/x64/runner/Release/rustdesk.exe"
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "RustDesk portable packer failed."
+            }
+
+          }
+          finally {
+            Pop-Location
+          }
+
+          if (-not (Test-Path $oldPacker)) {
+            throw "Portable packer output was not created: $oldPacker"
+          }
+
+          $outputName = $env:OUTPUT_FILENAME
+
+          if (-not $outputName) {
+            $outputName = "RustDesk.exe"
+          }
+
+          if (-not $outputName.EndsWith(".exe", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $outputName += ".exe"
+          }
+
+          $releaseDir = Join-Path $PWD "Release"
+
+          if (Test-Path $releaseDir) {
+            Remove-Item $releaseDir -Recurse -Force
+          }
 
           New-Item `
             -ItemType Directory `
             -Force `
-            -Path ".\Release" |
+            -Path $releaseDir |
             Out-Null
 
-
-          $exe = Get-ChildItem `
-            -Path "." `
-            -Recurse `
-            -Include "rustdesk.exe","RustDesk.exe" `
-            -File `
-            -ErrorAction SilentlyContinue |
-            Where-Object {
-              $_.FullName -notmatch "\\target\\debug\\"
-            } |
-            Select-Object -First 1
-
-
-          if (-not $exe) {
-
-            throw "RustDesk executable not found."
-          }
-
-
-          $outputName = $env:OUTPUT_FILENAME
-
-
-          if (-not $outputName) {
-
-            $outputName = "RustDesk.exe"
-          }
-
-
-          if (-not $outputName.EndsWith(".exe")) {
-
-            $outputName += ".exe"
-          }
-
+          $finalExe = Join-Path $releaseDir $outputName
 
           Copy-Item `
-            $exe.FullName `
-            ".\Release\$outputName" `
+            $oldPacker `
+            $finalExe `
             -Force
 
+          if (-not (Test-Path $finalExe)) {
+            throw "Final single-file executable was not created: $finalExe"
+          }
 
           Write-Host ""
-          Write-Host "Final executable:"
-          Write-Host ".\Release\$outputName"
+          Write-Host "=============================================="
+          Write-Host "SINGLE-FILE BUILD SUCCESSFUL"
+          Write-Host "=============================================="
+          Write-Host "Output: $finalExe"
+          Write-Host "Size: $((Get-Item $finalExe).Length) bytes"
+          Write-Host ""
+          Write-Host "The published artifact contains only this EXE."
 
 
       # ==========================================================
@@ -1055,6 +1119,9 @@ jobs:
           Architecture:
           x64
 
+          Packaging:
+          Single-file self-extracted executable
+
           Flutter:
           ${{ env.FLUTTER_VERSION }}
 
@@ -1073,7 +1140,7 @@ jobs:
 
 
       # ==========================================================
-      # 26. Upload artifact
+      # 26. Upload single-file Windows client
       # ==========================================================
 
       - name: Upload Windows client
@@ -1088,7 +1155,6 @@ jobs:
 
           path: |
             rustdesk/Release/*.exe
-            rustdesk/Release/build-info.txt
 
           if-no-files-found: error
 
