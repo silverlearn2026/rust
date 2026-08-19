@@ -3,1247 +3,230 @@ name: Build Custom RustDesk Windows Client
 on:
   workflow_dispatch:
     inputs:
-
       version:
-        description: "RustDesk tag / branch / commit"
         required: true
         type: string
         default: "master"
-
       server:
-        description: "Rendezvous / ID server"
         required: false
         type: string
         default: ""
-
       key:
-        description: "RustDesk public key"
         required: false
         type: string
         default: ""
-
       apiServer:
-        description: "RustDesk API server"
         required: false
         type: string
         default: ""
-
       custom:
-        description: "Base64 encoded RustDesk custom configuration"
         required: false
         type: string
         default: ""
-
       uuid:
-        description: "Client UUID"
         required: false
         type: string
         default: ""
-
       iconlink:
-        description: "Client icon URL"
         required: false
         type: string
         default: ""
-
       logolink:
-        description: "Client logo URL"
         required: false
         type: string
         default: ""
-
       appname:
-        description: "Application name"
         required: false
         type: string
         default: "RustDesk"
-
       filename:
-        description: "Output executable filename"
         required: false
         type: string
         default: "RustDesk.exe"
-
       extras:
-        description: "Additional client configuration"
+        description: "Complete Laravel appearance/client JSON"
         required: false
         type: string
         default: ""
-
       upload_artifact:
-        description: "Upload generated Windows client"
         required: false
         type: boolean
         default: true
 
-
 permissions:
   contents: read
 
-
 env:
-
-  # ============================================================
-  # RustDesk / Build versions
-  # ============================================================
-
   FLUTTER_VERSION: "3.24.5"
-
-  RUST_VERSION: "stable"
-
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
-
   VCPKG_TRIPLET: "x64-windows-static"
-
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-
-  # Flutter Rust Bridge version used by this RustDesk generation
   FRB_VERSION: "1.80.1"
 
-
 jobs:
-
   build:
-
-    name: Build RustDesk Windows x64
-
     runs-on: windows-2022
-
     steps:
+      - uses: actions/checkout@v4
 
-      # ==========================================================
-      # 1. Checkout builder repository
-      # ==========================================================
-
-      - name: Checkout builder repository
-
-        uses: actions/checkout@v4
-
-
-      # ==========================================================
-      # 2. Checkout RustDesk
-      # ==========================================================
-
-      - name: Checkout RustDesk
-
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
         with:
           repository: rustdesk/rustdesk
           ref: ${{ inputs.version }}
           path: rustdesk
           submodules: recursive
 
-
-      # ==========================================================
-      # 3. Display build information
-      # ==========================================================
-
-      - name: Display build information
-
-        shell: pwsh
-
-        run: |
-
-          Write-Host "=============================================="
-          Write-Host "       RustDesk Custom Windows Builder"
-          Write-Host "=============================================="
-
-          Write-Host "RustDesk version : ${{ inputs.version }}"
-          Write-Host "Application      : ${{ inputs.appname }}"
-          Write-Host "Filename         : ${{ inputs.filename }}"
-          Write-Host "UUID             : ${{ inputs.uuid }}"
-          Write-Host "Server           : ${{ inputs.server }}"
-          Write-Host "API Server       : ${{ inputs.apiServer }}"
-          Write-Host "Icon URL         : ${{ inputs.iconlink }}"
-          Write-Host "Logo URL         : ${{ inputs.logolink }}"
-          Write-Host "Flutter          : ${{ env.FLUTTER_VERSION }}"
-          Write-Host "FRB              : ${{ env.FRB_VERSION }}"
-
-          Write-Host "=============================================="
-
-
-      # ==========================================================
-      # 4. Setup Python
-      # ==========================================================
-
-      - name: Setup Python
-
-        uses: actions/setup-python@v5
-
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-
-      # ==========================================================
-      # 5. Setup Flutter
-      # ==========================================================
-
-      - name: Setup Flutter
-
-        uses: subosito/flutter-action@v2
-
+      - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
 
-
-      # ==========================================================
-      # 6. Verify Flutter
-      # ==========================================================
-
-      - name: Verify Flutter
-
-        shell: pwsh
-
-        run: |
-
-          Write-Host "=============================================="
-          Write-Host "Flutter Environment"
-          Write-Host "=============================================="
-
-          Write-Host ""
-          Write-Host "Flutter:"
-          flutter --version
-
-          Write-Host ""
-          Write-Host "Dart:"
-          dart --version
-
-          Write-Host ""
-          Write-Host "Flutter Doctor:"
-          flutter doctor -v
-
-
-      # ==========================================================
-      # 7. Setup Rust
-      # ==========================================================
-
-      - name: Setup Rust
-
-        uses: dtolnay/rust-toolchain@stable
-
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
 
-
-      # ==========================================================
-      # 8. Verify Rust
-      # ==========================================================
-
-      - name: Verify Rust
-
-        shell: pwsh
-
-        run: |
-
-          Write-Host "=============================================="
-          Write-Host "Rust Environment"
-          Write-Host "=============================================="
-
-          rustc --version
-          cargo --version
-          rustup show
-
-
-      # ==========================================================
-      # 9. Rust cache
-      # ==========================================================
-
-      - name: Rust cache
-
-        uses: Swatinem/rust-cache@v2
-
+      - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            rustdesk
+          workspaces: rustdesk
 
-
-      # ==========================================================
-      # 10. Setup vcpkg
-      # ==========================================================
-
-      - name: Setup vcpkg
-
-        uses: lukka/run-vcpkg@v11
-
+      - uses: lukka/run-vcpkg@v11
         with:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
           doNotCache: false
 
-
-      # ==========================================================
-      # 11. Verify vcpkg
-      # ==========================================================
-
-      - name: Verify vcpkg
-
-        shell: pwsh
-
-        run: |
-
-          Write-Host "=============================================="
-          Write-Host "vcpkg Environment"
-          Write-Host "=============================================="
-
-          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
-
-          if (-not $env:VCPKG_ROOT) {
-            throw "VCPKG_ROOT is not set."
-          }
-
-          if (-not (Test-Path "$env:VCPKG_ROOT\vcpkg.exe")) {
-            throw "vcpkg.exe not found."
-          }
-
-          & "$env:VCPKG_ROOT\vcpkg.exe" version
-
-
-      # ==========================================================
-      # 12. Install vcpkg dependencies
-      # ==========================================================
-
       - name: Install vcpkg dependencies
-
         shell: pwsh
-
         working-directory: rustdesk
-
         env:
-
           VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_TRIPLET }}
-
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
-
         run: |
+          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet "${{ env.VCPKG_TRIPLET }}" --x-install-root="$env:VCPKG_ROOT\installed"
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
 
-          Write-Host "=============================================="
-          Write-Host "Installing vcpkg dependencies"
-          Write-Host "=============================================="
-
-          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
-          Write-Host "Triplet=$env:VCPKG_DEFAULT_TRIPLET"
-
-          & "$env:VCPKG_ROOT\vcpkg.exe" install `
-            --triplet "${{ env.VCPKG_TRIPLET }}" `
-            --x-install-root="$env:VCPKG_ROOT\installed"
-
-          if ($LASTEXITCODE -ne 0) {
-
-            Write-Host "vcpkg installation failed."
-
-            exit $LASTEXITCODE
-          }
-
-
-      # ==========================================================
-      # 13. Verify vcpkg packages
-      # ==========================================================
-
-      - name: Verify vcpkg packages
-
+      - name: Apply Laravel configuration
         shell: pwsh
-
-        run: |
-
-          Write-Host "=============================================="
-          Write-Host "Installed vcpkg packages"
-          Write-Host "=============================================="
-
-          & "$env:VCPKG_ROOT\vcpkg.exe" list
-
-
-      # ==========================================================
-      # 14. Create builder configuration
-      # ==========================================================
-
-      - name: Create builder configuration
-
-        shell: pwsh
-
         working-directory: rustdesk
-
         env:
-
-          CLIENT_SERVER: ${{ inputs.server }}
-
-          CLIENT_KEY: ${{ inputs.key }}
-
-          CLIENT_API_SERVER: ${{ inputs.apiServer }}
-
-          CLIENT_UUID: ${{ inputs.uuid }}
-
-          CLIENT_ICON: ${{ inputs.iconlink }}
-
-          CLIENT_LOGO: ${{ inputs.logolink }}
-
-          CLIENT_APPNAME: ${{ inputs.appname }}
-
-          CLIENT_FILENAME: ${{ inputs.filename }}
-
-          CLIENT_EXTRAS: ${{ inputs.extras }}
-
+          SERVER: ${{ inputs.server }}
+          KEY: ${{ inputs.key }}
+          API: ${{ inputs.apiServer }}
+          APP: ${{ inputs.appname }}
+          FILE: ${{ inputs.filename }}
+          EXTRAS: ${{ inputs.extras }}
         run: |
+          $script="..\scripts\apply_config.py"
+          if(-not(Test-Path $script)){throw "apply_config.py not found."}
+          $a=@("--rustdesk","$PWD")
+          if($env:SERVER){$a+=@("--server",$env:SERVER)}
+          if($env:KEY){$a+=@("--key",$env:KEY)}
+          if($env:API){$a+=@("--api",$env:API)}
+          if($env:APP){$a+=@("--appname",$env:APP)}
+          if($env:FILE){$a+=@("--filename",$env:FILE)}
+          if($env:EXTRAS){$a+=@("--extras",$env:EXTRAS)}
+          python $script @a
+          if($LASTEXITCODE -ne 0){throw "Configuration patch failed."}
 
-          Write-Host "=============================================="
-          Write-Host "Creating builder configuration"
-          Write-Host "=============================================="
-
-          New-Item `
-            -ItemType Directory `
-            -Force `
-            -Path ".\res" |
-            Out-Null
-
-
-          @"
-          {
-            "uuid": "$env:CLIENT_UUID",
-            "server": "$env:CLIENT_SERVER",
-            "key": "$env:CLIENT_KEY",
-            "apiServer": "$env:CLIENT_API_SERVER",
-            "iconlink": "$env:CLIENT_ICON",
-            "logolink": "$env:CLIENT_LOGO",
-            "appname": "$env:CLIENT_APPNAME",
-            "filename": "$env:CLIENT_FILENAME",
-            "extras": "$env:CLIENT_EXTRAS"
-          }
-          "@ | Set-Content `
-            -Path ".\res\builder-config.json" `
-            -Encoding UTF8
-
-
-          Write-Host "builder-config.json created."
-
-
-      # ==========================================================
-      # 15. Create custom_.txt
-      # ==========================================================
-
-      - name: Create custom configuration
-
+      - name: Verify generated configuration
         shell: pwsh
-
         working-directory: rustdesk
-
-        env:
-
-          CUSTOM_CONFIG: ${{ inputs.custom }}
-
         run: |
+          if(-not(Test-Path ".\flutter\lib\generated_client_config.dart")){throw "generated_client_config.dart missing."}
+          if(-not(Test-Path ".\res\custom-client-config.json")){throw "custom-client-config.json missing."}
+          Get-Content ".\flutter\lib\generated_client_config.dart"
 
-          if ($env:CUSTOM_CONFIG) {
-
-            Write-Host "Decoding custom configuration..."
-
-            try {
-
-              $bytes = [Convert]::FromBase64String(
-                $env:CUSTOM_CONFIG
-              )
-
-              [IO.File]::WriteAllBytes(
-                "$PWD\res\custom_.txt",
-                $bytes
-              )
-
-              Write-Host "custom_.txt created."
-
-            }
-
-            catch {
-
-              Write-Error "Invalid Base64 custom configuration."
-
-              throw
-            }
-
-          }
-
-          else {
-
-            Write-Host "No custom configuration supplied."
-
-          }
-
-
-      # ==========================================================
-      # 16. Apply configuration script
-      # ==========================================================
-
-      - name: Apply RustDesk configuration
-
+      - name: Flutter dependencies
         shell: pwsh
-
-        working-directory: rustdesk
-
-        env:
-
-          RUSTDESK_SERVER: ${{ inputs.server }}
-
-          RUSTDESK_KEY: ${{ inputs.key }}
-
-          RUSTDESK_API_SERVER: ${{ inputs.apiServer }}
-
-          RUSTDESK_APPNAME: ${{ inputs.appname }}
-
-          RUSTDESK_FILENAME: ${{ inputs.filename }}
-
-          RUSTDESK_EXTRAS: ${{ inputs.extras }}
-
-        run: |
-
-          $script = "..\scripts\apply_config.py"
-
-          if (-not (Test-Path $script)) {
-
-            Write-Error "apply_config.py was not found."
-
-            exit 1
-          }
-
-          Write-Host "Running apply_config.py..."
-
-          $args = @(
-            "--rustdesk", "$PWD"
-          )
-
-          if ($env:RUSTDESK_SERVER) {
-            $args += @(
-              "--server",
-              $env:RUSTDESK_SERVER
-            )
-          }
-
-          if ($env:RUSTDESK_KEY) {
-            $args += @(
-              "--key",
-              $env:RUSTDESK_KEY
-            )
-          }
-
-          if ($env:RUSTDESK_API_SERVER) {
-            $args += @(
-              "--api",
-              $env:RUSTDESK_API_SERVER
-            )
-          }
-
-          if ($env:RUSTDESK_APPNAME) {
-            $args += @(
-              "--appname",
-              $env:RUSTDESK_APPNAME
-            )
-          }
-
-          if ($env:RUSTDESK_FILENAME) {
-            $args += @(
-              "--filename",
-              $env:RUSTDESK_FILENAME
-            )
-          }
-
-          # --------------------------------------------------------
-          # Force the Windows client window size.
-          # Only the window dimensions/behavior are changed here; all
-          # other branding/appearance values supplied through extras
-          # are preserved.
-          #
-          # Target size: 280 x 439 pixels
-          # Fixed size: minimum == maximum
-          # --------------------------------------------------------
-
-          $effectiveExtrasObject = $null
-
-          if ($env:RUSTDESK_EXTRAS) {
-            try {
-              $effectiveExtrasObject = $env:RUSTDESK_EXTRAS | ConvertFrom-Json
-            }
-            catch {
-              Write-Error "Invalid RUSTDESK_EXTRAS JSON: $($_.Exception.Message)"
-              exit 1
-            }
-          }
-          else {
-            $effectiveExtrasObject = [pscustomobject]@{}
-          }
-
-          if (-not ($effectiveExtrasObject.PSObject.Properties.Name -contains "appearance")) {
-            $effectiveExtrasObject | Add-Member -MemberType NoteProperty -Name "appearance" -Value ([pscustomobject]@{})
-          }
-
-          $effectiveWindow = [pscustomobject]@{
-            initial_width  = 280
-            initial_height = 439
-            min_width      = 280
-            min_height     = 439
-            max_width      = 280
-            max_height     = 439
-            center         = $true
-            resizable      = $false
-            maximized      = $false
-            always_on_top  = $false
-          }
-
-          if ($effectiveExtrasObject.appearance.PSObject.Properties.Name -contains "window") {
-            $effectiveExtrasObject.appearance.window = $effectiveWindow
-          }
-          else {
-            $effectiveExtrasObject.appearance | Add-Member -MemberType NoteProperty -Name "window" -Value $effectiveWindow
-          }
-
-          $effectiveExtras = $effectiveExtrasObject | ConvertTo-Json -Depth 30 -Compress
-
-          $args += @(
-            "--extras",
-            $effectiveExtras
-          )
-
-          Write-Host "Window configuration:"
-          Write-Host "  Width      : 280"
-          Write-Host "  Height     : 439"
-          Write-Host "  Min Width  : 280"
-          Write-Host "  Min Height : 439"
-          Write-Host "  Max Width  : 280"
-          Write-Host "  Max Height : 439"
-          Write-Host "  Center     : true"
-          Write-Host "  Resizable  : false"
-
-          Write-Host "Executing:"
-          Write-Host "python $script $($args -join ' ')"
-
-          python $script @args
-
-          if ($LASTEXITCODE -ne 0) {
-
-            Write-Error "apply_config.py failed."
-
-            exit $LASTEXITCODE
-          }
-
-          Write-Host "RustDesk configuration applied successfully."
-
-
-      # ==========================================================
-      # 17. Inspect configuration
-      # ==========================================================
-
-      - name: Inspect configuration
-
-        shell: pwsh
-
-        working-directory: rustdesk
-
-        run: |
-
-          Write-Host "=============================================="
-          Write-Host "Configuration files"
-          Write-Host "=============================================="
-
-
-          if (Test-Path ".\res\builder-config.json") {
-
-            Get-Content ".\res\builder-config.json"
-          }
-
-
-          if (Test-Path ".\res\custom_.txt") {
-
-            Write-Host ""
-            Write-Host "custom_.txt exists."
-
-            $size = (
-              Get-Item ".\res\custom_.txt"
-            ).Length
-
-            Write-Host "Size: $size bytes"
-          }
-
-
-      # ==========================================================
-      # 18. Flutter dependencies
-      # ==========================================================
-
-      - name: Flutter pub get
-
-        shell: pwsh
-
         working-directory: rustdesk\flutter
-
         run: |
-
-          Write-Host "=============================================="
-          Write-Host "Flutter dependencies"
-          Write-Host "=============================================="
-
           flutter clean
-
           flutter pub get
+          if($LASTEXITCODE -ne 0){throw "flutter pub get failed."}
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "flutter pub get failed."
-          }
-
-
-      # ==========================================================
-      # 19. Install Flutter Rust Bridge Code Generator
-      # ==========================================================
-
-      - name: Install Flutter Rust Bridge Codegen
-
+      - name: Install FRB
         shell: pwsh
-
         working-directory: rustdesk
-
         run: |
+          cargo install flutter_rust_bridge_codegen --version "${{ env.FRB_VERSION }}" --locked
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
 
-          Write-Host "=============================================="
-          Write-Host "Flutter Rust Bridge Code Generator"
-          Write-Host "=============================================="
-
-          Write-Host ""
-          Write-Host "Installing flutter_rust_bridge_codegen..."
-
-          cargo install flutter_rust_bridge_codegen `
-            --version "${{ env.FRB_VERSION }}" `
-            --locked
-
-          if ($LASTEXITCODE -ne 0) {
-
-            Write-Error "Failed to install flutter_rust_bridge_codegen."
-
-            exit $LASTEXITCODE
-          }
-
-          Write-Host ""
-          Write-Host "Checking code generator..."
-
-          $codegen = "$env:USERPROFILE\.cargo\bin\flutter_rust_bridge_codegen.exe"
-
-          if (-not (Test-Path $codegen)) {
-
-            throw "flutter_rust_bridge_codegen.exe was not found at $codegen"
-          }
-
-          & $codegen --version
-
-          if ($LASTEXITCODE -ne 0) {
-
-            throw "flutter_rust_bridge_codegen --version failed."
-          }
-
-          Write-Host ""
-          Write-Host "Flutter Rust Bridge Codegen installed successfully."
-
-
-      # ==========================================================
-      # 20. Generate Flutter Rust Bridge
-      # ==========================================================
-
-      - name: Generate Flutter Rust Bridge
-
+      - name: Generate FRB
         shell: pwsh
-
         working-directory: rustdesk
-
         run: |
+          $c="$env:USERPROFILE\.cargo\bin\flutter_rust_bridge_codegen.exe"
+          if(-not(Test-Path $c)){throw "FRB codegen missing."}
+          & $c --rust-input ".\src\flutter_ffi.rs" --dart-output ".\flutter\lib\generated_bridge.dart" --c-output ".\flutter\macos\Runner\bridge_generated.h"
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
 
-          Write-Host "=============================================="
-          Write-Host "Generating Flutter Rust Bridge"
-          Write-Host "=============================================="
-
-          $codegen = "$env:USERPROFILE\.cargo\bin\flutter_rust_bridge_codegen.exe"
-
-          if (-not (Test-Path $codegen)) {
-
-            throw "flutter_rust_bridge_codegen.exe not found."
-          }
-
-          Write-Host ""
-          Write-Host "Rust input:"
-          Write-Host ".\src\flutter_ffi.rs"
-
-          if (-not (Test-Path ".\src\flutter_ffi.rs")) {
-
-            throw "src\flutter_ffi.rs not found."
-          }
-
-          Write-Host ""
-          Write-Host "Running Flutter Rust Bridge generator..."
-
-          & $codegen `
-            --rust-input ".\src\flutter_ffi.rs" `
-            --dart-output ".\flutter\lib\generated_bridge.dart" `
-            --c-output ".\flutter\macos\Runner\bridge_generated.h"
-
-          if ($LASTEXITCODE -ne 0) {
-
-            Write-Error "Flutter Rust Bridge generation failed."
-
-            exit $LASTEXITCODE
-          }
-
-          Write-Host ""
-          Write-Host "Checking generated bridge files..."
-
-          Write-Host ""
-          Write-Host "src directory:"
-
-          Get-ChildItem ".\src" -Filter "*bridge*" -ErrorAction SilentlyContinue |
-            Select-Object FullName
-
-
-          Write-Host ""
-          Write-Host "flutter/lib directory:"
-
-          Get-ChildItem ".\flutter\lib" -Filter "*bridge*" -ErrorAction SilentlyContinue |
-            Select-Object FullName
-
-
-      # ==========================================================
-      # 21. Verify generated bridge
-      # ==========================================================
-
-      - name: Verify Flutter Rust Bridge
-
+      - name: Verify FRB
         shell: pwsh
-
         working-directory: rustdesk
-
         run: |
-
-          Write-Host "=============================================="
-          Write-Host "Verifying generated Flutter Rust Bridge"
-          Write-Host "=============================================="
-
-
-          $requiredFiles = @(
-            ".\src\bridge_generated.rs",
-            ".\src\bridge_generated.io.rs",
-            ".\flutter\lib\generated_bridge.dart"
-          )
-
-
-          $failed = $false
-
-
-          foreach ($file in $requiredFiles) {
-
-            if (Test-Path $file) {
-
-              $item = Get-Item $file
-
-              Write-Host "FOUND:"
-              Write-Host "  $file"
-              Write-Host "  Size: $($item.Length) bytes"
-              Write-Host ""
-
-            }
-
-            else {
-
-              Write-Error "MISSING:"
-              Write-Error "  $file"
-
-              $failed = $true
-            }
+          foreach($f in @(".\src\bridge_generated.rs",".\src\bridge_generated.io.rs",".\flutter\lib\generated_bridge.dart")){
+            if(-not(Test-Path $f)){throw "Missing: $f"}
           }
 
-
-          if ($failed) {
-
-            Write-Host ""
-            Write-Host "=============================================="
-            Write-Host "Flutter Rust Bridge generation FAILED"
-            Write-Host "=============================================="
-
-            Write-Host ""
-            Write-Host "src bridge files:"
-
-            Get-ChildItem ".\src" -Filter "*bridge*" -ErrorAction SilentlyContinue
-
-
-            Write-Host ""
-            Write-Host "flutter bridge files:"
-
-            Get-ChildItem ".\flutter\lib" -Filter "*bridge*" -ErrorAction SilentlyContinue
-
-
-            exit 1
-          }
-
-
-          Write-Host ""
-          Write-Host "Flutter Rust Bridge verification successful."
-
-
-      # ==========================================================
-      # 22. Build RustDesk
-      # ==========================================================
-
-      - name: Build RustDesk
-
-        id: build
-
+      - name: Build RustDesk runtime
         shell: pwsh
-
         working-directory: rustdesk
-
         env:
-
           VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
-
           VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_TRIPLET }}
-
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
-
         run: |
+          python build.py --portable --flutter --skip-portable-pack --hwcodec
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
 
-          Write-Host "=============================================="
-          Write-Host "Building RustDesk"
-          Write-Host "=============================================="
-
-          Write-Host ""
-          Write-Host "VCPKG_ROOT:"
-          Write-Host $env:VCPKG_ROOT
-
-          Write-Host ""
-          Write-Host "VCPKG Triplet:"
-          Write-Host $env:VCPKG_DEFAULT_TRIPLET
-
-          Write-Host ""
-          Write-Host "Rust:"
-          rustc --version
-          cargo --version
-
-          Write-Host ""
-          Write-Host "Flutter:"
-          flutter --version
-
-          Write-Host ""
-          Write-Host "Python:"
-          python --version
-
-          Write-Host ""
-          Write-Host "Bridge:"
-          
-          if (Test-Path ".\src\bridge_generated.rs") {
-            Write-Host "bridge_generated.rs FOUND"
-          }
-          else {
-            throw "bridge_generated.rs is missing before build."
-          }
-
-          Write-Host ""
-          Write-Host "Starting RustDesk build..."
-
-
-          python build.py `
-            --portable `
-            --flutter `
-            --skip-portable-pack `
-            --hwcodec
-
-
-          if ($LASTEXITCODE -ne 0) {
-
-            Write-Host ""
-            Write-Host "=============================================="
-            Write-Host "RUSTDESK BUILD FAILED"
-            Write-Host "=============================================="
-
-            exit $LASTEXITCODE
-          }
-
-          Write-Host ""
-          Write-Host "RustDesk build completed successfully."
-
-
-      # ==========================================================
-      # 23. Verify generated Windows runtime
-      # ==========================================================
-
-      - name: Verify generated Windows runtime
-
+      - name: Verify Windows runtime
         shell: pwsh
-
         working-directory: rustdesk
-
         run: |
-
-          Write-Host "=============================================="
-          Write-Host "Verifying RustDesk Windows runtime"
-          Write-Host "=============================================="
-
-          $runtimeDir = Join-Path $PWD "flutter\build\windows\x64\runner\Release"
-
-          if (-not (Test-Path $runtimeDir)) {
-            throw "Flutter Windows Release directory was not found: $runtimeDir"
+          $d=Join-Path $PWD "flutter\build\windows\x64\runner\Release"
+          if(-not(Test-Path (Join-Path $d "rustdesk.exe"))){throw "rustdesk.exe missing."}
+          foreach($f in @("flutter_windows.dll","desktop_multi_window_plugin.dll")){
+            if(-not(Test-Path (Join-Path $d $f))){throw "$f missing."}
           }
+          if(-not(Test-Path (Join-Path $d "data"))){throw "Flutter data missing."}
 
-          $runtimeExe = Join-Path $runtimeDir "rustdesk.exe"
-
-          if (-not (Test-Path $runtimeExe)) {
-            throw "rustdesk.exe was not found: $runtimeExe"
-          }
-
-          Write-Host "Runtime directory:"
-          Write-Host $runtimeDir
-          Write-Host ""
-          Write-Host "Executable:"
-          Write-Host $runtimeExe
-
-          $required = @(
-            "flutter_windows.dll",
-            "desktop_multi_window_plugin.dll"
-          )
-
-          foreach ($file in $required) {
-            $path = Join-Path $runtimeDir $file
-
-            if (Test-Path $path) {
-              $item = Get-Item $path
-              Write-Host "FOUND: $file ($($item.Length) bytes)"
-            }
-            else {
-              Write-Warning "Runtime file not found: $file"
-            }
-          }
-
-          $dataDir = Join-Path $runtimeDir "data"
-
-          if (Test-Path $dataDir) {
-            Write-Host "FOUND: data directory"
-          }
-          else {
-            throw "Flutter data directory was not found: $dataDir"
-          }
-
-          Write-Host ""
-          Write-Host "Runtime verification completed."
-
-
-      # ==========================================================
-      # 24. Build single-file self-extracted Windows executable
-      # ==========================================================
-
-      - name: Build single-file portable executable
-
+      - name: Build single-file EXE
         shell: pwsh
-
         working-directory: rustdesk
-
         env:
-          OUTPUT_FILENAME: ${{ inputs.filename }}
-
+          OUTPUT: ${{ inputs.filename }}
         run: |
-
-          Write-Host "=============================================="
-          Write-Host "Building single-file portable executable"
-          Write-Host "=============================================="
-
-          $runtimeDir = Join-Path $PWD "flutter\build\windows\x64\runner\Release"
-          $runtimeExe = Join-Path $runtimeDir "rustdesk.exe"
-          $portableDir = Join-Path $PWD "libs\portable"
-
-          if (-not (Test-Path $runtimeExe)) {
-            throw "RustDesk runtime executable was not found: $runtimeExe"
-          }
-
-          if (-not (Test-Path $portableDir)) {
-            throw "RustDesk portable packer directory was not found: $portableDir"
-          }
-
-          # Remove previous packer output so an old executable can never
-          # accidentally be published.
-          $oldPacker = Join-Path $PWD "target\release\rustdesk-portable-packer.exe"
-          if (Test-Path $oldPacker) {
-            Remove-Item $oldPacker -Force
-          }
-
-          Push-Location $portableDir
-
-          try {
-
-            Write-Host "Installing portable packer dependencies..."
-
+          $p=Join-Path $PWD "libs\portable"
+          $packer=Join-Path $PWD "target\release\rustdesk-portable-packer.exe"
+          if(Test-Path $packer){Remove-Item $packer -Force}
+          Push-Location $p
+          try{
             python -m pip install -r requirements.txt
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to install portable packer dependencies."
-            }
-
-            Write-Host ""
-            Write-Host "Packing runtime:"
-            Write-Host $runtimeDir
-
-            python .\generate.py `
-              -f "../../flutter/build/windows/x64/runner/Release" `
-              -o "." `
-              -e "../../flutter/build/windows/x64/runner/Release/rustdesk.exe"
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "RustDesk portable packer failed."
-            }
-
-          }
-          finally {
-            Pop-Location
-          }
-
-          if (-not (Test-Path $oldPacker)) {
-            throw "Portable packer output was not created: $oldPacker"
-          }
-
-          $outputName = $env:OUTPUT_FILENAME
-
-          if (-not $outputName) {
-            $outputName = "RustDesk.exe"
-          }
-
-          if (-not $outputName.EndsWith(".exe", [System.StringComparison]::OrdinalIgnoreCase)) {
-            $outputName += ".exe"
-          }
-
-          $releaseDir = Join-Path $PWD "Release"
-
-          if (Test-Path $releaseDir) {
-            Remove-Item $releaseDir -Recurse -Force
-          }
-
-          New-Item `
-            -ItemType Directory `
-            -Force `
-            -Path $releaseDir |
-            Out-Null
-
-          $finalExe = Join-Path $releaseDir $outputName
-
-          Copy-Item `
-            $oldPacker `
-            $finalExe `
-            -Force
-
-          if (-not (Test-Path $finalExe)) {
-            throw "Final single-file executable was not created: $finalExe"
-          }
-
-          Write-Host ""
-          Write-Host "=============================================="
-          Write-Host "SINGLE-FILE BUILD SUCCESSFUL"
-          Write-Host "=============================================="
-          Write-Host "Output: $finalExe"
-          Write-Host "Size: $((Get-Item $finalExe).Length) bytes"
-          Write-Host ""
-          Write-Host "The published artifact contains only this EXE."
-
-
-      # ==========================================================
-      # 25. Build metadata
-      # ==========================================================
-
-      - name: Create build metadata
-
-        shell: pwsh
-
-        working-directory: rustdesk
-
-        run: |
-
-          @"
-          RustDesk Custom Windows Client
-          ==================================
-
-          Version:
-          ${{ inputs.version }}
-
-          Application:
-          ${{ inputs.appname }}
-
-          Filename:
-          ${{ inputs.filename }}
-
-          UUID:
-          ${{ inputs.uuid }}
-
-          Server:
-          ${{ inputs.server }}
-
-          API Server:
-          ${{ inputs.apiServer }}
-
-          Architecture:
-          x64
-
-          Packaging:
-          Single-file self-extracted executable
-
-          Flutter:
-          ${{ env.FLUTTER_VERSION }}
-
-          Flutter Rust Bridge:
-          ${{ env.FRB_VERSION }}
-
-          VCPKG:
-          ${{ env.VCPKG_COMMIT_ID }}
-
-          GitHub Run:
-          ${{ github.run_number }}
-
-          "@ | Set-Content `
-            ".\Release\build-info.txt" `
-            -Encoding UTF8
-
-
-      # ==========================================================
-      # 26. Upload single-file Windows client
-      # ==========================================================
+            if($LASTEXITCODE -ne 0){throw "portable dependencies failed."}
+            python .\generate.py -f "../../flutter/build/windows/x64/runner/Release" -o "." -e "../../flutter/build/windows/x64/runner/Release/rustdesk.exe"
+            if($LASTEXITCODE -ne 0){throw "portable packer failed."}
+          }finally{Pop-Location}
+          if(-not(Test-Path $packer)){throw "portable EXE was not created."}
+          $name=$env:OUTPUT
+          if(-not $name){$name="RustDesk.exe"}
+          if(-not $name.EndsWith(".exe",[StringComparison]::OrdinalIgnoreCase)){$name+=".exe"}
+          $r=Join-Path $PWD "Release"
+          if(Test-Path $r){Remove-Item $r -Recurse -Force}
+          New-Item -ItemType Directory -Force -Path $r|Out-Null
+          Copy-Item $packer (Join-Path $r $name) -Force
+          if(-not(Test-Path (Join-Path $r $name))){throw "Final EXE missing."}
 
       - name: Upload Windows client
-
         if: ${{ inputs.upload_artifact }}
-
         uses: actions/upload-artifact@v4
-
         with:
-
           name: rustdesk-windows-x64-${{ github.run_number }}
-
-          path: |
-            rustdesk/Release/*.exe
-
+          path: rustdesk/Release/*.exe
           if-no-files-found: error
-
           retention-days: 7
-
-
-      # ==========================================================
-      # 27. Summary
-      # ==========================================================
-
-      - name: Build summary
-
-        if: always()
-
-        shell: pwsh
-
-        run: |
-
-          Write-Host ""
-          Write-Host "=============================================="
-          Write-Host "BUILD SUMMARY"
-          Write-Host "=============================================="
-
-          Write-Host "Status       : ${{ job.status }}"
-          Write-Host "Version      : ${{ inputs.version }}"
-          Write-Host "Application  : ${{ inputs.appname }}"
-          Write-Host "Filename     : ${{ inputs.filename }}"
-          Write-Host "Architecture : x64"
-          Write-Host "Flutter      : ${{ env.FLUTTER_VERSION }}"
-          Write-Host "FRB          : ${{ env.FRB_VERSION }}"
-          Write-Host "VCPKG        : ${{ env.VCPKG_COMMIT_ID }}"
-
-          Write-Host "=============================================="
