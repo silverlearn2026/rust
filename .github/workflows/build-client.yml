@@ -546,12 +546,71 @@ jobs:
             )
           }
 
+          # --------------------------------------------------------
+          # Force the Windows client window size.
+          # Only the window dimensions/behavior are changed here; all
+          # other branding/appearance values supplied through extras
+          # are preserved.
+          #
+          # Target size: 280 x 439 pixels
+          # Fixed size: minimum == maximum
+          # --------------------------------------------------------
+
+          $effectiveExtrasObject = $null
+
           if ($env:RUSTDESK_EXTRAS) {
-            $args += @(
-              "--extras",
-              $env:RUSTDESK_EXTRAS
-            )
+            try {
+              $effectiveExtrasObject = $env:RUSTDESK_EXTRAS | ConvertFrom-Json
+            }
+            catch {
+              Write-Error "Invalid RUSTDESK_EXTRAS JSON: $($_.Exception.Message)"
+              exit 1
+            }
           }
+          else {
+            $effectiveExtrasObject = [pscustomobject]@{}
+          }
+
+          if (-not ($effectiveExtrasObject.PSObject.Properties.Name -contains "appearance")) {
+            $effectiveExtrasObject | Add-Member -MemberType NoteProperty -Name "appearance" -Value ([pscustomobject]@{})
+          }
+
+          $effectiveWindow = [pscustomobject]@{
+            initial_width  = 280
+            initial_height = 439
+            min_width      = 280
+            min_height     = 439
+            max_width      = 280
+            max_height     = 439
+            center         = $true
+            resizable      = $false
+            maximized      = $false
+            always_on_top  = $false
+          }
+
+          if ($effectiveExtrasObject.appearance.PSObject.Properties.Name -contains "window") {
+            $effectiveExtrasObject.appearance.window = $effectiveWindow
+          }
+          else {
+            $effectiveExtrasObject.appearance | Add-Member -MemberType NoteProperty -Name "window" -Value $effectiveWindow
+          }
+
+          $effectiveExtras = $effectiveExtrasObject | ConvertTo-Json -Depth 30 -Compress
+
+          $args += @(
+            "--extras",
+            $effectiveExtras
+          )
+
+          Write-Host "Window configuration:"
+          Write-Host "  Width      : 280"
+          Write-Host "  Height     : 439"
+          Write-Host "  Min Width  : 280"
+          Write-Host "  Min Height : 439"
+          Write-Host "  Max Width  : 280"
+          Write-Host "  Max Height : 439"
+          Write-Host "  Center     : true"
+          Write-Host "  Resizable  : false"
 
           Write-Host "Executing:"
           Write-Host "python $script $($args -join ' ')"
