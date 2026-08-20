@@ -4,51 +4,73 @@ on:
   workflow_dispatch:
     inputs:
       version:
+        description: "RustDesk tag / branch / commit"
         required: true
         type: string
         default: "master"
+
       server:
+        description: "RustDesk ID/Relay server"
         required: false
         type: string
         default: ""
+
       key:
+        description: "RustDesk server public key"
         required: false
         type: string
         default: ""
+
       apiServer:
+        description: "API server"
         required: false
         type: string
         default: ""
+
       custom:
+        description: "Custom configuration / legacy custom data"
         required: false
         type: string
         default: ""
+
       uuid:
+        description: "Client UUID"
         required: false
         type: string
         default: ""
+
       iconlink:
+        description: "Application icon URL"
         required: false
         type: string
         default: ""
+
       logolink:
+        description: "Main logo URL"
         required: false
         type: string
         default: ""
+
       appname:
+        description: "Application name"
         required: false
         type: string
         default: "RustDesk"
+
       filename:
+        description: "Output EXE filename"
         required: false
         type: string
         default: "RustDesk.exe"
+
       extras:
         description: "Complete Laravel appearance/client JSON"
         required: false
         type: string
         default: ""
+
       upload_artifact:
+        description: "Upload final EXE as GitHub Artifact"
         required: false
         type: boolean
         default: true
@@ -64,54 +86,422 @@ env:
   FRB_VERSION: "1.80.1"
 
 jobs:
-  build:
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/checkout@v4
+  build:
+    name: Build Custom RustDesk Client
+    runs-on: windows-2022
+
+    steps:
+
+      # ============================================================
+      # 1. Checkout builder repository
+      # ============================================================
+
+      - name: Checkout Builder
+        uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 2. Checkout RustDesk source
+      # ============================================================
+
+      - name: Checkout RustDesk
+        uses: actions/checkout@v4
         with:
           repository: rustdesk/rustdesk
           ref: ${{ inputs.version }}
           path: rustdesk
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+
+      # ============================================================
+      # 3. Python
+      # ============================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - uses: subosito/flutter-action@v2
+
+      # ============================================================
+      # 4. Flutter
+      # ============================================================
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
 
-      - uses: dtolnay/rust-toolchain@stable
+
+      # ============================================================
+      # 5. Rust
+      # ============================================================
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2
+
+      # ============================================================
+      # 6. Rust cache
+      # ============================================================
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: rustdesk
 
-      - uses: lukka/run-vcpkg@v11
+
+      # ============================================================
+      # 7. vcpkg
+      # ============================================================
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
         with:
           vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
           doNotCache: false
 
-      - name: Install vcpkg dependencies
+
+      # ============================================================
+      # 8. Install vcpkg dependencies
+      # ============================================================
+
+      - name: Install vcpkg Dependencies
         shell: pwsh
         working-directory: rustdesk
         env:
           VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_TRIPLET }}
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
         run: |
-          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet "${{ env.VCPKG_TRIPLET }}" --x-install-root="$env:VCPKG_ROOT\installed"
-          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
 
-      - name: Apply Laravel configuration
+          Write-Host "Installing vcpkg dependencies..."
+
+          & "$env:VCPKG_ROOT\vcpkg.exe" install `
+            --triplet "${{ env.VCPKG_TRIPLET }}" `
+            --x-install-root="$env:VCPKG_ROOT\installed"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "vcpkg dependency installation failed."
+          }
+
+
+      # ============================================================
+      # 9. Prepare Laravel configuration
+      #
+      # This is the important part.
+      #
+      # Laravel may send:
+      #
+      # {
+      #   "appearance": {
+      #      "theme": "{\"mode\":\"dark\"}"
+      #   }
+      # }
+      #
+      # instead of:
+      #
+      # {
+      #   "appearance": {
+      #      "theme": {
+      #         "mode": "dark"
+      #      }
+      #   }
+      # }
+      #
+      # We normalize ALL nested JSON strings here.
+      # ============================================================
+
+      - name: Prepare Laravel Configuration
+        shell: pwsh
+        env:
+          INPUT_SERVER: ${{ inputs.server }}
+          INPUT_KEY: ${{ inputs.key }}
+          INPUT_API_SERVER: ${{ inputs.apiServer }}
+          INPUT_CUSTOM: ${{ inputs.custom }}
+          INPUT_UUID: ${{ inputs.uuid }}
+          INPUT_ICON: ${{ inputs.iconlink }}
+          INPUT_LOGO: ${{ inputs.logolink }}
+          INPUT_APPNAME: ${{ inputs.appname }}
+          INPUT_FILENAME: ${{ inputs.filename }}
+          INPUT_EXTRAS: ${{ inputs.extras }}
+
+        run: |
+
+          Write-Host "=============================================="
+          Write-Host "Preparing Laravel client configuration"
+          Write-Host "=============================================="
+
+          function Convert-NestedJsonStrings {
+              param(
+                  [Parameter(Mandatory = $true)]
+                  $Value
+              )
+
+              # -----------------------------
+              # Object
+              # -----------------------------
+
+              if ($null -eq $Value) {
+                  return $null
+              }
+
+              if ($Value -is [System.Management.Automation.PSCustomObject]) {
+
+                  $result = [ordered]@{}
+
+                  foreach ($property in $Value.PSObject.Properties) {
+
+                      $result[$property.Name] =
+                          Convert-NestedJsonStrings $property.Value
+                  }
+
+                  return [PSCustomObject]$result
+              }
+
+              # -----------------------------
+              # Dictionary
+              # -----------------------------
+
+              if ($Value -is [System.Collections.IDictionary]) {
+
+                  $result = [ordered]@{}
+
+                  foreach ($key in $Value.Keys) {
+
+                      $result[$key] =
+                          Convert-NestedJsonStrings $Value[$key]
+                  }
+
+                  return [PSCustomObject]$result
+              }
+
+              # -----------------------------
+              # Array
+              # -----------------------------
+
+              if ($Value -is [System.Collections.IEnumerable] -and
+                  $Value -isnot [string]) {
+
+                  $result = @()
+
+                  foreach ($item in $Value) {
+
+                      $result +=
+                          Convert-NestedJsonStrings $item
+                  }
+
+                  return $result
+              }
+
+              # -----------------------------
+              # String containing JSON
+              # -----------------------------
+
+              if ($Value -is [string]) {
+
+                  $text = $Value.Trim()
+
+                  if ($text.Length -gt 1) {
+
+                      $looksLikeJsonObject =
+                          $text.StartsWith("{") -and
+                          $text.EndsWith("}")
+
+                      $looksLikeJsonArray =
+                          $text.StartsWith("[") -and
+                          $text.EndsWith("]")
+
+                      if ($looksLikeJsonObject -or $looksLikeJsonArray) {
+
+                          try {
+
+                              $parsed = $text | ConvertFrom-Json
+
+                              return Convert-NestedJsonStrings $parsed
+
+                          }
+                          catch {
+
+                              # It is an ordinary string.
+                              return $Value
+                          }
+                      }
+                  }
+
+                  return $Value
+              }
+
+              return $Value
+          }
+
+
+          # ============================================================
+          # Start with extras
+          # ============================================================
+
+          $extras = [ordered]@{}
+
+          if ($env:INPUT_EXTRAS -and $env:INPUT_EXTRAS.Trim()) {
+
+              Write-Host "Laravel extras received."
+
+              try {
+
+                  $parsedExtras =
+                      $env:INPUT_EXTRAS | ConvertFrom-Json
+
+                  $normalizedExtras =
+                      Convert-NestedJsonStrings $parsedExtras
+
+                  if ($normalizedExtras -is [PSCustomObject]) {
+
+                      foreach ($property in $normalizedExtras.PSObject.Properties) {
+
+                          $extras[$property.Name] =
+                              $property.Value
+                      }
+                  }
+                  else {
+
+                      throw "extras root must be a JSON object."
+                  }
+              }
+              catch {
+
+                  Write-Host ""
+                  Write-Host "ERROR parsing Laravel extras:"
+                  Write-Host $_
+                  Write-Host ""
+
+                  throw "Invalid extras JSON."
+              }
+          }
+          else {
+
+              Write-Host "No extras supplied."
+          }
+
+
+          # ============================================================
+          # Add top-level Laravel build parameters
+          # ============================================================
+
+          if ($env:INPUT_SERVER) {
+              $extras["server"] = $env:INPUT_SERVER
+          }
+
+          if ($env:INPUT_KEY) {
+              $extras["key"] = $env:INPUT_KEY
+          }
+
+          if ($env:INPUT_API_SERVER) {
+              $extras["api_server"] = $env:INPUT_API_SERVER
+          }
+
+          if ($env:INPUT_UUID) {
+              $extras["uuid"] = $env:INPUT_UUID
+          }
+
+          if ($env:INPUT_ICON) {
+              $extras["iconlink"] = $env:INPUT_ICON
+          }
+
+          if ($env:INPUT_LOGO) {
+              $extras["logolink"] = $env:INPUT_LOGO
+          }
+
+          if ($env:INPUT_APPNAME) {
+              $extras["appname"] = $env:INPUT_APPNAME
+          }
+
+          if ($env:INPUT_FILENAME) {
+              $extras["filename"] = $env:INPUT_FILENAME
+          }
+
+          if ($env:INPUT_CUSTOM) {
+              $extras["custom"] = $env:INPUT_CUSTOM
+          }
+
+
+          # ============================================================
+          # Normalize once again after merging
+          # ============================================================
+
+          $finalConfig =
+              Convert-NestedJsonStrings ([PSCustomObject]$extras)
+
+
+          # ============================================================
+          # Print diagnostic information
+          # ============================================================
+
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "FINAL LARAVEL CONFIGURATION"
+          Write-Host "=============================================="
+
+          $finalJson =
+              $finalConfig |
+              ConvertTo-Json -Depth 100 -Compress
+
+          Write-Host $finalJson
+
+          Write-Host ""
+          Write-Host "Configuration length:"
+          Write-Host $finalJson.Length
+
+
+          # ============================================================
+          # Save configuration to workspace
+          # ============================================================
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "$env:GITHUB_WORKSPACE\build-config" |
+            Out-Null
+
+          $configFile =
+              "$env:GITHUB_WORKSPACE\build-config\client-config.json"
+
+          $finalConfig |
+              ConvertTo-Json -Depth 100 |
+              Set-Content `
+                -Path $configFile `
+                -Encoding UTF8
+
+
+          Write-Host ""
+          Write-Host "Configuration saved:"
+          Write-Host $configFile
+
+
+          # ============================================================
+          # Export normalized configuration to next steps
+          # ============================================================
+
+          "RUSTDESK_EXTRAS=$finalJson" |
+              Out-File `
+                -FilePath $env:GITHUB_ENV `
+                -Append `
+                -Encoding utf8
+
+          Write-Host ""
+          Write-Host "Laravel configuration prepared successfully."
+
+
+      # ============================================================
+      # 10. Apply configuration to RustDesk source
+      # ============================================================
+
+      - name: Apply Laravel Configuration
         shell: pwsh
         working-directory: rustdesk
         env:
@@ -121,112 +511,538 @@ jobs:
           APP: ${{ inputs.appname }}
           FILE: ${{ inputs.filename }}
           EXTRAS: ${{ inputs.extras }}
-        run: |
-          $script="..\scripts\apply_config.py"
-          if(-not(Test-Path $script)){throw "apply_config.py not found."}
-          $a=@("--rustdesk","$PWD")
-          if($env:SERVER){$a+=@("--server",$env:SERVER)}
-          if($env:KEY){$a+=@("--key",$env:KEY)}
-          if($env:API){$a+=@("--api",$env:API)}
-          if($env:APP){$a+=@("--appname",$env:APP)}
-          if($env:FILE){$a+=@("--filename",$env:FILE)}
-          if($env:EXTRAS){$a+=@("--extras",$env:EXTRAS)}
-          python $script @a
-          if($LASTEXITCODE -ne 0){throw "Configuration patch failed."}
+          NORMALIZED_EXTRAS: ${{ env.RUSTDESK_EXTRAS }}
 
-      - name: Verify generated configuration
+        run: |
+
+          Write-Host "=============================================="
+          Write-Host "Applying Laravel configuration"
+          Write-Host "=============================================="
+
+          $script = "..\scripts\apply_config.py"
+
+          if (-not (Test-Path $script)) {
+              throw "apply_config.py not found."
+          }
+
+
+          # ------------------------------------------------------------
+          # Prefer normalized configuration.
+          # ------------------------------------------------------------
+
+          $configuration = $env:NORMALIZED_EXTRAS
+
+          if (-not $configuration) {
+              $configuration = $env:EXTRAS
+          }
+
+
+          # ------------------------------------------------------------
+          # Build arguments
+          # ------------------------------------------------------------
+
+          $a = @(
+              "--rustdesk",
+              "$PWD"
+          )
+
+
+          if ($env:SERVER) {
+              $a += @(
+                  "--server",
+                  $env:SERVER
+              )
+          }
+
+
+          if ($env:KEY) {
+              $a += @(
+                  "--key",
+                  $env:KEY
+              )
+          }
+
+
+          if ($env:API) {
+              $a += @(
+                  "--api",
+                  $env:API
+              )
+          }
+
+
+          if ($env:APP) {
+              $a += @(
+                  "--appname",
+                  $env:APP
+              )
+          }
+
+
+          if ($env:FILE) {
+              $a += @(
+                  "--filename",
+                  $env:FILE
+              )
+          }
+
+
+          if ($configuration) {
+              $a += @(
+                  "--extras",
+                  $configuration
+              )
+          }
+
+
+          Write-Host ""
+          Write-Host "Running configuration patcher..."
+          Write-Host ""
+
+
+          python $script @a
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Configuration patch failed."
+          }
+
+
+          Write-Host ""
+          Write-Host "Configuration patch completed successfully."
+
+
+      # ============================================================
+      # 11. Verify generated configuration
+      # ============================================================
+
+      - name: Verify Generated Configuration
         shell: pwsh
         working-directory: rustdesk
         run: |
-          if(-not(Test-Path ".\flutter\lib\generated_client_config.dart")){throw "generated_client_config.dart missing."}
-          if(-not(Test-Path ".\res\custom-client-config.json")){throw "custom-client-config.json missing."}
-          Get-Content ".\flutter\lib\generated_client_config.dart"
 
-      - name: Flutter dependencies
+          Write-Host "=============================================="
+          Write-Host "Verifying generated configuration"
+          Write-Host "=============================================="
+
+
+          $generated =
+              ".\flutter\lib\generated_client_config.dart"
+
+          if (-not (Test-Path $generated)) {
+              throw "generated_client_config.dart missing."
+          }
+
+
+          $customConfig =
+              ".\res\custom-client-config.json"
+
+          if (-not (Test-Path $customConfig)) {
+              throw "custom-client-config.json missing."
+          }
+
+
+          Write-Host ""
+          Write-Host "Generated Dart configuration:"
+          Write-Host "----------------------------------------------"
+
+          Get-Content $generated
+
+          Write-Host ""
+          Write-Host "Custom JSON configuration:"
+          Write-Host "----------------------------------------------"
+
+          Get-Content $customConfig
+
+
+      # ============================================================
+      # 12. Flutter dependencies
+      # ============================================================
+
+      - name: Flutter Dependencies
         shell: pwsh
         working-directory: rustdesk\flutter
         run: |
+
+          Write-Host "Cleaning Flutter..."
+
           flutter clean
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "flutter clean failed."
+          }
+
+
+          Write-Host "Running flutter pub get..."
+
           flutter pub get
-          if($LASTEXITCODE -ne 0){throw "flutter pub get failed."}
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "flutter pub get failed."
+          }
+
+
+      # ============================================================
+      # 13. Install Flutter Rust Bridge
+      # ============================================================
 
       - name: Install FRB
         shell: pwsh
         working-directory: rustdesk
         run: |
-          cargo install flutter_rust_bridge_codegen --version "${{ env.FRB_VERSION }}" --locked
-          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+          cargo install `
+            flutter_rust_bridge_codegen `
+            --version "${{ env.FRB_VERSION }}" `
+            --locked
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "FRB installation failed."
+          }
+
+
+      # ============================================================
+      # 14. Generate Flutter Rust Bridge
+      # ============================================================
 
       - name: Generate FRB
         shell: pwsh
         working-directory: rustdesk
         run: |
-          $c="$env:USERPROFILE\.cargo\bin\flutter_rust_bridge_codegen.exe"
-          if(-not(Test-Path $c)){throw "FRB codegen missing."}
-          & $c --rust-input ".\src\flutter_ffi.rs" --dart-output ".\flutter\lib\generated_bridge.dart" --c-output ".\flutter\macos\Runner\bridge_generated.h"
-          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+          $codegen =
+              "$env:USERPROFILE\.cargo\bin\flutter_rust_bridge_codegen.exe"
+
+
+          if (-not (Test-Path $codegen)) {
+              throw "FRB codegen executable missing."
+          }
+
+
+          & $codegen `
+            --rust-input ".\src\flutter_ffi.rs" `
+            --dart-output ".\flutter\lib\generated_bridge.dart" `
+            --c-output ".\flutter\macos\Runner\bridge_generated.h"
+
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "FRB generation failed."
+          }
+
+
+      # ============================================================
+      # 15. Verify FRB
+      # ============================================================
 
       - name: Verify FRB
         shell: pwsh
         working-directory: rustdesk
         run: |
-          foreach($f in @(".\src\bridge_generated.rs",".\src\bridge_generated.io.rs",".\flutter\lib\generated_bridge.dart")){
-            if(-not(Test-Path $f)){throw "Missing: $f"}
+
+          $files = @(
+              ".\src\bridge_generated.rs",
+              ".\src\bridge_generated.io.rs",
+              ".\flutter\lib\generated_bridge.dart"
+          )
+
+
+          foreach ($file in $files) {
+
+              if (-not (Test-Path $file)) {
+                  throw "Missing generated file: $file"
+              }
+
+              Write-Host "OK: $file"
           }
 
-      - name: Build RustDesk runtime
+
+      # ============================================================
+      # 16. Build RustDesk runtime
+      # ============================================================
+
+      - name: Build RustDesk Runtime
         shell: pwsh
         working-directory: rustdesk
         env:
           VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
           VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_TRIPLET }}
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_TRIPLET }}
-        run: |
-          python build.py --portable --flutter --skip-portable-pack --hwcodec
-          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
 
-      - name: Verify Windows runtime
+        run: |
+
+          Write-Host "=============================================="
+          Write-Host "Building RustDesk runtime"
+          Write-Host "=============================================="
+
+
+          python build.py `
+            --portable `
+            --flutter `
+            --skip-portable-pack `
+            --hwcodec
+
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "RustDesk runtime build failed."
+          }
+
+
+      # ============================================================
+      # 17. Verify Windows runtime
+      # ============================================================
+
+      - name: Verify Windows Runtime
         shell: pwsh
         working-directory: rustdesk
         run: |
-          $d=Join-Path $PWD "flutter\build\windows\x64\runner\Release"
-          if(-not(Test-Path (Join-Path $d "rustdesk.exe"))){throw "rustdesk.exe missing."}
-          foreach($f in @("flutter_windows.dll","desktop_multi_window_plugin.dll")){
-            if(-not(Test-Path (Join-Path $d $f))){throw "$f missing."}
-          }
-          if(-not(Test-Path (Join-Path $d "data"))){throw "Flutter data missing."}
 
-      - name: Build single-file EXE
+          $runtime =
+              Join-Path `
+                $PWD `
+                "flutter\build\windows\x64\runner\Release"
+
+
+          Write-Host "Runtime directory:"
+          Write-Host $runtime
+
+
+          # ------------------------------------------------------------
+          # Main executable
+          # ------------------------------------------------------------
+
+          if (-not (
+              Test-Path (
+                  Join-Path $runtime "rustdesk.exe"
+              )
+          )) {
+              throw "rustdesk.exe missing."
+          }
+
+
+          # ------------------------------------------------------------
+          # Flutter DLL
+          # ------------------------------------------------------------
+
+          foreach ($file in @(
+              "flutter_windows.dll",
+              "desktop_multi_window_plugin.dll"
+          )) {
+
+              $path =
+                  Join-Path $runtime $file
+
+              if (-not (Test-Path $path)) {
+                  throw "$file missing."
+              }
+
+              Write-Host "OK: $file"
+          }
+
+
+          # ------------------------------------------------------------
+          # Flutter data
+          # ------------------------------------------------------------
+
+          $data =
+              Join-Path $runtime "data"
+
+
+          if (-not (Test-Path $data)) {
+              throw "Flutter data directory missing."
+          }
+
+
+          Write-Host "Runtime verification successful."
+
+
+      # ============================================================
+      # 18. Build SINGLE EXE
+      #
+      # The portable packer embeds the runtime files into one EXE.
+      #
+      # End user receives ONLY:
+      #
+      #     YourClient.exe
+      #
+      # No DLL / data folder is required beside it.
+      # ============================================================
+
+      - name: Build Single File EXE
         shell: pwsh
         working-directory: rustdesk
         env:
           OUTPUT: ${{ inputs.filename }}
-        run: |
-          $p=Join-Path $PWD "libs\portable"
-          $packer=Join-Path $PWD "target\release\rustdesk-portable-packer.exe"
-          if(Test-Path $packer){Remove-Item $packer -Force}
-          Push-Location $p
-          try{
-            python -m pip install -r requirements.txt
-            if($LASTEXITCODE -ne 0){throw "portable dependencies failed."}
-            python .\generate.py -f "../../flutter/build/windows/x64/runner/Release" -o "." -e "../../flutter/build/windows/x64/runner/Release/rustdesk.exe"
-            if($LASTEXITCODE -ne 0){throw "portable packer failed."}
-          }finally{Pop-Location}
-          if(-not(Test-Path $packer)){throw "portable EXE was not created."}
-          $name=$env:OUTPUT
-          if(-not $name){$name="RustDesk.exe"}
-          if(-not $name.EndsWith(".exe",[StringComparison]::OrdinalIgnoreCase)){$name+=".exe"}
-          $r=Join-Path $PWD "Release"
-          if(Test-Path $r){Remove-Item $r -Recurse -Force}
-          New-Item -ItemType Directory -Force -Path $r|Out-Null
-          Copy-Item $packer (Join-Path $r $name) -Force
-          if(-not(Test-Path (Join-Path $r $name))){throw "Final EXE missing."}
 
-      - name: Upload Windows client
+        run: |
+
+          Write-Host "=============================================="
+          Write-Host "Creating single-file EXE"
+          Write-Host "=============================================="
+
+
+          $portable =
+              Join-Path `
+                $PWD `
+                "libs\portable"
+
+
+          $packer =
+              Join-Path `
+                $PWD `
+                "target\release\rustdesk-portable-packer.exe"
+
+
+          # ------------------------------------------------------------
+          # Remove old packer
+          # ------------------------------------------------------------
+
+          if (Test-Path $packer) {
+              Remove-Item $packer -Force
+          }
+
+
+          # ------------------------------------------------------------
+          # Install portable packer dependencies
+          # ------------------------------------------------------------
+
+          Push-Location $portable
+
+          try {
+
+              python -m pip install -r requirements.txt
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Portable packer dependencies failed."
+              }
+
+
+              # --------------------------------------------------------
+              # Pack complete Flutter runtime
+              # --------------------------------------------------------
+
+              python .\generate.py `
+                -f "../../flutter/build/windows/x64/runner/Release" `
+                -o "." `
+                -e "../../flutter/build/windows/x64/runner/Release/rustdesk.exe"
+
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Portable EXE generation failed."
+              }
+
+          }
+          finally {
+
+              Pop-Location
+          }
+
+
+          # ------------------------------------------------------------
+          # Verify packed EXE
+          # ------------------------------------------------------------
+
+          if (-not (Test-Path $packer)) {
+              throw "rustdesk-portable-packer.exe was not created."
+          }
+
+
+          # ------------------------------------------------------------
+          # Determine final filename
+          # ------------------------------------------------------------
+
+          $name = $env:OUTPUT
+
+          if (-not $name) {
+              $name = "RustDesk.exe"
+          }
+
+
+          if (-not $name.EndsWith(
+              ".exe",
+              [StringComparison]::OrdinalIgnoreCase
+          )) {
+              $name = "$name.exe"
+          }
+
+
+          # ------------------------------------------------------------
+          # Create Release directory
+          # ------------------------------------------------------------
+
+          $release =
+              Join-Path `
+                $PWD `
+                "Release"
+
+
+          if (Test-Path $release) {
+              Remove-Item `
+                $release `
+                -Recurse `
+                -Force
+          }
+
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $release |
+            Out-Null
+
+
+          # ------------------------------------------------------------
+          # Copy ONLY the final EXE
+          # ------------------------------------------------------------
+
+          $finalExe =
+              Join-Path `
+                $release `
+                $name
+
+
+          Copy-Item `
+            $packer `
+            $finalExe `
+            -Force
+
+
+          # ------------------------------------------------------------
+          # Final verification
+          # ------------------------------------------------------------
+
+          if (-not (Test-Path $finalExe)) {
+              throw "Final EXE missing."
+          }
+
+
+          $size =
+              (Get-Item $finalExe).Length
+
+
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "FINAL EXE CREATED"
+          Write-Host "=============================================="
+          Write-Host "File: $finalExe"
+          Write-Host "Size: $size bytes"
+          Write-Host ""
+          Write-Host "This is the ONLY file that will be uploaded."
+          Write-Host "=============================================="
+
+
+      # ============================================================
+      # 19. Upload ONLY EXE
+      # ============================================================
+
+      - name: Upload Windows Client
         if: ${{ inputs.upload_artifact }}
+
         uses: actions/upload-artifact@v4
+
         with:
           name: rustdesk-windows-x64-${{ github.run_number }}
+
           path: rustdesk/Release/*.exe
+
           if-no-files-found: error
+
           retention-days: 7
