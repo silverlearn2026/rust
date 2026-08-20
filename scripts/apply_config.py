@@ -2,313 +2,236 @@
 # -*- coding: utf-8 -*-
 
 """
-RustDesk Custom Client Configuration Patcher
+RustDesk Laravel Custom Client Builder
 
-This script:
-    1. Reads Laravel client configuration.
-    2. Accepts nested JSON objects OR JSON encoded strings.
-    3. Generates:
-           flutter/lib/generated_client_config.dart
-           res/custom-client-config.json
-    4. Patches RustDesk Flutter sources where supported.
-    5. Applies server / key / API / application-name settings.
-    6. Fails loudly when a required patch target cannot be found.
+This script is intentionally fail-fast.
 
-IMPORTANT:
-    This script does not assume that Laravel nested objects are always
-    dictionaries. Laravel/PHP may serialize nested values as JSON strings.
+It:
+  - Parses Laravel extras, including JSON encoded nested strings.
+  - Patches RustDesk hbb_common/config.rs with server + public key.
+  - Patches API server through RustDesk configuration options.
+  - Patches application name.
+  - Generates a strongly typed Flutter configuration.
+  - Patches Flutter startup/theme/window configuration where the
+    corresponding source structures are found.
+  - Downloads branding assets.
+  - Patches Windows icon resources when possible.
+  - FAILS if mandatory server/key/config patches cannot be verified.
+
+This script is designed to run after:
+    actions/checkout rustdesk with submodules: recursive
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import re
+import shutil
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 
 # ============================================================
-# Utility
+# Logging
 # ============================================================
-
-def die(message: str, code: int = 1) -> None:
-    print(f"[patcher] ERROR: {message}", file=sys.stderr)
-    raise SystemExit(code)
-
 
 def info(message: str) -> None:
     print(f"[patcher] {message}")
 
 
+def warn(message: str) -> None:
+    print(f"[patcher] WARNING: {message}")
+
+
+def fail(message: str) -> None:
+    print(f"[patcher] ERROR: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
 # ============================================================
-# JSON helpers
+# Recursive Laravel JSON parser
 # ============================================================
 
-def parse_json_value(value: Any) -> Any:
+def decode_nested(value: Any, depth: int = 0) -> Any:
     """
-    Recursively convert JSON strings into Python objects.
+    Laravel may send nested structures like:
 
-    Examples:
+        "theme": "system"
 
-        '{"mode":"dark"}'
-            ->
-        {"mode": "dark"}
+    or:
 
-    And:
-
-        {
-            "theme": "{\"mode\":\"dark\"}"
+        "assets": {
+            "app_icon": "{\"url\":\"...\",\"file\":\"...\"}"
         }
 
-            ->
-        {
-            "theme": {
-                "mode": "dark"
-            }
-        }
+    Decode JSON strings recursively.
     """
 
-    if value is None:
-        return None
-
-    # --------------------------------------------------------
-    # Dictionary
-    # --------------------------------------------------------
+    if depth > 8:
+        return value
 
     if isinstance(value, dict):
         return {
-            str(k): parse_json_value(v)
+            str(k): decode_nested(v, depth + 1)
             for k, v in value.items()
         }
 
-    # --------------------------------------------------------
-    # List / tuple
-    # --------------------------------------------------------
-
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list):
         return [
-            parse_json_value(v)
+            decode_nested(v, depth + 1)
             for v in value
         ]
 
-    # --------------------------------------------------------
-    # String
-    # --------------------------------------------------------
-
     if isinstance(value, str):
+        s = value.strip()
 
-        text = value.strip()
-
-        if not text:
+        if not s:
             return value
 
-        # Try JSON repeatedly.
-        current: Any = value
+        # Don't parse ordinary strings.
+        if not (
+            (s.startswith("{") and s.endswith("}"))
+            or
+            (s.startswith("[") and s.endswith("]"))
+            or
+            (s.startswith('"') and s.endswith('"'))
+        ):
+            return value
 
-        for _ in range(5):
+        try:
+            decoded = json.loads(s)
+        except Exception:
+            return value
 
-            if not isinstance(current, str):
-                return parse_json_value(current)
-
-            current_text = current.strip()
-
-            if not current_text:
-                return current
-
-            if not (
-                (
-                    current_text.startswith("{")
-                    and current_text.endswith("}")
-                )
-                or
-                (
-                    current_text.startswith("[")
-                    and current_text.endswith("]")
-                )
-                or
-                (
-                    current_text.startswith('"')
-                    and current_text.endswith('"')
-                )
-            ):
-                return current
-
-            try:
-                decoded = json.loads(current_text)
-            except Exception:
-                return current
-
-            if decoded == current:
-                return current
-
-            current = decoded
-
-        return current
+        return decode_nested(decoded, depth + 1)
 
     return value
 
 
 def as_dict(value: Any) -> dict[str, Any]:
-    """
-    Always return a dictionary.
+    value = decode_nested(value)
 
-    This is the important fix for:
+    return value if isinstance(value, dict) else {}
 
-        AttributeError:
-        'str' object has no attribute 'get'
-    """
 
-    value = parse_json_value(value)
+def as_list(value: Any) -> list[Any]:
+    value = decode_nested(value)
 
-    if isinstance(value, dict):
+    return value if isinstance(value, list) else []
+
+
+def get_dict(parent: Any, key: str) -> dict[str, Any]:
+    if not isinstance(parent, dict):
+        return {}
+
+    return as_dict(parent.get(key))
+
+
+def get_str(
+    parent: Any,
+    key: str,
+    default: str = ""
+) -> str:
+
+    if not isinstance(parent, dict):
+        return default
+
+    value = decode_nested(parent.get(key))
+
+    if value is None:
+        return default
+
+    if isinstance(value, (dict, list)):
+        return default
+
+    return str(value)
+
+
+def get_bool(
+    parent: Any,
+    key: str,
+    default: bool = False
+) -> bool:
+
+    if not isinstance(parent, dict):
+        return default
+
+    value = decode_nested(parent.get(key))
+
+    if isinstance(value, bool):
         return value
 
-    return {}
+    if isinstance(value, int):
+        return value != 0
 
-
-def get_dict(parent: Any, *keys: str) -> dict[str, Any]:
-    """
-    Return the first dictionary found under the supplied keys.
-    """
-
-    parent_dict = as_dict(parent)
-
-    for key in keys:
-
-        if key not in parent_dict:
-            continue
-
-        value = as_dict(parent_dict.get(key))
-
-        if value:
-            return value
-
-    return {}
-
-
-def get_value(
-    parent: Any,
-    *keys: str,
-    default: Any = None
-) -> Any:
-
-    parent_dict = as_dict(parent)
-
-    for key in keys:
-
-        if key in parent_dict:
-            return parent_dict[key]
+    if isinstance(value, str):
+        return value.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+            "enabled",
+        }
 
     return default
 
 
+def get_int(
+    parent: Any,
+    key: str,
+    default: int
+) -> int:
+
+    if not isinstance(parent, dict):
+        return default
+
+    value = decode_nested(parent.get(key))
+
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
 # ============================================================
-# Root extras loader
+# Configuration loading
 # ============================================================
 
-def load_extras(value: str | None) -> dict[str, Any]:
+def load_extras(raw: str) -> dict[str, Any]:
 
-    if not value:
+    if not raw:
         return {}
 
     try:
-        decoded = json.loads(value)
+        value = json.loads(raw)
     except Exception as exc:
-        die(f"Invalid --extras JSON: {exc}")
+        fail(f"Invalid --extras JSON: {exc}")
 
-    decoded = parse_json_value(decoded)
+    value = decode_nested(value)
 
-    if not isinstance(decoded, dict):
-        die("--extras must contain a JSON object.")
+    if not isinstance(value, dict):
+        fail("--extras must be a JSON object.")
 
-    return decoded
+    return value
 
-
-# ============================================================
-# Dart escaping
-# ============================================================
-
-def dart_string(value: Any) -> str:
-
-    if value is None:
-        value = ""
-
-    value = str(value)
-
-    return (
-        value
-        .replace("\\", "\\\\")
-        .replace("'", "\\'")
-        .replace("\r", "\\r")
-        .replace("\n", "\\n")
-    )
-
-
-def dart_bool(value: Any, default: bool = False) -> str:
-
-    if value is None:
-        return "true" if default else "false"
-
-    if isinstance(value, bool):
-        return "true" if value else "false"
-
-    if isinstance(value, (int, float)):
-        return "true" if value != 0 else "false"
-
-    text = str(value).strip().lower()
-
-    if text in {
-        "1",
-        "true",
-        "yes",
-        "on",
-        "enabled",
-    }:
-        return "true"
-
-    return "false"
-
-
-def dart_number(
-    value: Any,
-    default: int | float
-) -> str:
-
-    if value is None:
-        return str(default)
-
-    try:
-
-        number = float(value)
-
-        if number.is_integer():
-            return str(int(number))
-
-        return str(number)
-
-    except Exception:
-
-        return str(default)
-
-
-# ============================================================
-# Configuration normalization
-# ============================================================
 
 def normalize_config(
-    cfg: dict[str, Any],
+    extras: dict[str, Any],
     args: argparse.Namespace
 ) -> dict[str, Any]:
 
-    cfg = parse_json_value(cfg)
+    cfg = decode_nested(extras)
 
     if not isinstance(cfg, dict):
         cfg = {}
 
     # --------------------------------------------------------
-    # Top-level arguments override extras
+    # Explicit Workflow values always win.
     # --------------------------------------------------------
 
     if args.server:
@@ -326,95 +249,696 @@ def normalize_config(
     if args.filename:
         cfg["filename"] = args.filename
 
+    if args.uuid:
+        cfg["uuid"] = args.uuid
+
+    if args.iconlink:
+        cfg["iconlink"] = args.iconlink
+
+    if args.logolink:
+        cfg["logolink"] = args.logolink
+
     # --------------------------------------------------------
-    # Normalize known nested structures
+    # Normalize common nested sections.
     # --------------------------------------------------------
 
-    appearance = as_dict(
+    cfg["appearance"] = as_dict(
         cfg.get("appearance")
     )
 
-    if appearance:
-        cfg["appearance"] = appearance
+    appearance = cfg["appearance"]
 
-    # Theme
-    if "theme" in appearance:
-        appearance["theme"] = as_dict(
-            appearance.get("theme")
-        )
+    appearance["window"] = as_dict(
+        appearance.get("window")
+    )
 
-    elif "theme" in cfg:
-        cfg["theme"] = as_dict(
-            cfg.get("theme")
-        )
+    appearance["colors"] = as_dict(
+        appearance.get("colors")
+    )
 
-    # Colors
-    if "colors" in appearance:
-        appearance["colors"] = as_dict(
-            appearance.get("colors")
-        )
+    appearance["main_screen"] = as_dict(
+        appearance.get("main_screen")
+    )
 
-    elif "colors" in cfg:
-        cfg["colors"] = as_dict(
-            cfg.get("colors")
-        )
+    appearance["texts"] = as_dict(
+        appearance.get("texts")
+    )
 
-    # Window
-    if "window" in appearance:
-        appearance["window"] = as_dict(
-            appearance.get("window")
-        )
+    appearance["tray"] = as_dict(
+        appearance.get("tray")
+    )
 
-    elif "window" in cfg:
-        cfg["window"] = as_dict(
-            cfg.get("window")
-        )
+    appearance["installer"] = as_dict(
+        appearance.get("installer")
+    )
 
-    # Main screen
-    if "main_screen" in appearance:
-        appearance["main_screen"] = as_dict(
-            appearance.get("main_screen")
-        )
+    appearance["assets"] = as_dict(
+        appearance.get("assets")
+    )
 
-    elif "main_screen" in cfg:
-        cfg["main_screen"] = as_dict(
-            cfg.get("main_screen")
-        )
+    # theme is intentionally scalar.
+    theme = decode_nested(
+        appearance.get("theme", "system")
+    )
 
+    if isinstance(theme, dict):
+        theme = theme.get("mode", "system")
+
+    theme = str(theme).lower()
+
+    if theme not in {
+        "system",
+        "light",
+        "dark",
+    }:
+        theme = "system"
+
+    appearance["theme"] = theme
+
+    # --------------------------------------------------------
     # Branding
-    if "branding" in appearance:
-        appearance["branding"] = as_dict(
-            appearance.get("branding")
-        )
-
-    elif "branding" in cfg:
-        cfg["branding"] = as_dict(
-            cfg.get("branding")
-        )
-
-    # Assets
-    if "assets" in appearance:
-        appearance["assets"] = as_dict(
-            appearance.get("assets")
-        )
-
-    elif "assets" in cfg:
-        cfg["assets"] = as_dict(
-            cfg.get("assets")
-        )
-
-    # --------------------------------------------------------
-    # Return completely recursively normalized config
     # --------------------------------------------------------
 
-    return parse_json_value(cfg)
+    cfg["branding"] = as_dict(
+        cfg.get("branding")
+    )
+
+    # Laravel can have branding.assets as well.
+    cfg["branding"]["assets"] = as_dict(
+        cfg["branding"].get("assets")
+    )
+
+    return cfg
 
 
 # ============================================================
-# Configuration file
+# Dart escaping
 # ============================================================
 
-def write_json_config(
+def dart_string(value: Any) -> str:
+
+    text = "" if value is None else str(value)
+
+    return (
+        text
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
+
+
+def dart_bool(value: Any) -> str:
+    return "true" if bool(value) else "false"
+
+
+# ============================================================
+# Generated Flutter configuration
+# ============================================================
+
+def generate_flutter_config(
+    root: Path,
+    cfg: dict[str, Any]
+) -> Path:
+
+    appearance = as_dict(cfg.get("appearance"))
+    window = as_dict(appearance.get("window"))
+    colors = as_dict(appearance.get("colors"))
+    main = as_dict(appearance.get("main_screen"))
+    texts = as_dict(appearance.get("texts"))
+    tray = as_dict(appearance.get("tray"))
+    installer = as_dict(appearance.get("installer"))
+
+    branding = as_dict(cfg.get("branding"))
+    assets = as_dict(appearance.get("assets"))
+
+    appname = (
+        get_str(cfg, "appname")
+        or
+        get_str(branding, "app_name")
+        or
+        "RustDesk"
+    )
+
+    theme = str(
+        appearance.get("theme", "system")
+    ).lower()
+
+    width = get_int(window, "initial_width", 1000)
+    height = get_int(window, "initial_height", 700)
+    min_width = get_int(window, "min_width", 800)
+    min_height = get_int(window, "min_height", 500)
+    max_width = get_int(window, "max_width", 1600)
+    max_height = get_int(window, "max_height", 1200)
+
+    server = get_str(cfg, "server")
+    key = get_str(cfg, "key")
+    api = (
+        get_str(cfg, "apiServer")
+        or
+        get_str(cfg, "api_server")
+    )
+
+    dart = f"""// ============================================================
+// GENERATED FILE - DO NOT EDIT
+// Generated by scripts/apply_config.py
+// ============================================================
+
+class GeneratedClientConfig {{
+
+  static const String appName =
+      '{dart_string(appname)}';
+
+  static const String server =
+      '{dart_string(server)}';
+
+  static const String publicKey =
+      '{dart_string(key)}';
+
+  static const String apiServer =
+      '{dart_string(api)}';
+
+  static const String uuid =
+      '{dart_string(get_str(cfg, "uuid"))}';
+
+  static const String theme =
+      '{dart_string(theme)}';
+
+  static const double initialWidth =
+      {width}.0;
+
+  static const double initialHeight =
+      {height}.0;
+
+  static const double minimumWidth =
+      {min_width}.0;
+
+  static const double minimumHeight =
+      {min_height}.0;
+
+  static const double maximumWidth =
+      {max_width}.0;
+
+  static const double maximumHeight =
+      {max_height}.0;
+
+  static const bool center =
+      {dart_bool(get_bool(window, "center", True))};
+
+  static const bool resizable =
+      {dart_bool(get_bool(window, "resizable", True))};
+
+  static const bool maximized =
+      {dart_bool(get_bool(window, "maximized", False))};
+
+  static const bool alwaysOnTop =
+      {dart_bool(get_bool(window, "always_on_top", False))};
+
+  static const bool showId =
+      {dart_bool(get_bool(main, "show_id", True))};
+
+  static const bool showPassword =
+      {dart_bool(get_bool(main, "show_password", True))};
+
+  static const bool showConnect =
+      {dart_bool(get_bool(main, "show_connect", True))};
+
+  static const bool showSettings =
+      {dart_bool(get_bool(main, "show_settings", True))};
+
+  static const bool showAbout =
+      {dart_bool(get_bool(main, "show_about", True))};
+
+  static const bool showRecentSessions =
+      {dart_bool(get_bool(main, "show_recent_sessions", True))};
+
+  static const bool showFavorites =
+      {dart_bool(get_bool(main, "show_favorites", True))};
+
+  static const bool showAddressBook =
+      {dart_bool(get_bool(main, "show_address_book", True))};
+
+  static const bool showConnectionType =
+      {dart_bool(get_bool(main, "show_connection_type", True))};
+
+  static const bool showServerStatus =
+      {dart_bool(get_bool(main, "show_server_status", True))};
+
+  static const String title =
+      '{dart_string(get_str(texts, "title"))}';
+
+  static const String subtitle =
+      '{dart_string(get_str(texts, "subtitle"))}';
+
+  static const String welcome =
+      '{dart_string(get_str(texts, "welcome"))}';
+
+  static const String connect =
+      '{dart_string(get_str(texts, "connect", "Connect"))}';
+
+  static const String ready =
+      '{dart_string(get_str(texts, "ready", "Ready"))}';
+
+  static const String connecting =
+      '{dart_string(get_str(texts, "connecting", "Connecting..."))}';
+
+  static const String connected =
+      '{dart_string(get_str(texts, "connected", "Connected"))}';
+
+  static const String disconnected =
+      '{dart_string(get_str(texts, "disconnected", "Disconnected"))}';
+
+  static const String myId =
+      '{dart_string(get_str(texts, "my_id", "My ID"))}';
+
+  static const String password =
+      '{dart_string(get_str(texts, "password", "Password"))}';
+
+  static const String remoteId =
+      '{dart_string(get_str(texts, "remote_id", "Remote ID"))}';
+
+  static const String incoming =
+      '{dart_string(get_str(texts, "incoming", "Incoming Connection"))}';
+
+  static const String outgoing =
+      '{dart_string(get_str(texts, "outgoing", "Outgoing Connection"))}';
+
+  static const String primaryColor =
+      '{dart_string(get_str(colors, "primary"))}';
+
+  static const String secondaryColor =
+      '{dart_string(get_str(colors, "secondary"))}';
+
+  static const String accentColor =
+      '{dart_string(get_str(colors, "accent"))}';
+
+  static const String backgroundColor =
+      '{dart_string(get_str(colors, "background"))}';
+
+  static const String surfaceColor =
+      '{dart_string(get_str(colors, "surface"))}';
+
+  static const String headerColor =
+      '{dart_string(get_str(colors, "header"))}';
+
+  static const String sidebarColor =
+      '{dart_string(get_str(colors, "sidebar"))}';
+
+  static const String textColor =
+      '{dart_string(get_str(colors, "text"))}';
+
+  static const String secondaryTextColor =
+      '{dart_string(get_str(colors, "secondary_text"))}';
+
+  static const String buttonColor =
+      '{dart_string(get_str(colors, "button"))}';
+
+  static const String buttonTextColor =
+      '{dart_string(get_str(colors, "button_text"))}';
+
+  static const String successColor =
+      '{dart_string(get_str(colors, "success"))}';
+
+  static const String warningColor =
+      '{dart_string(get_str(colors, "warning"))}';
+
+  static const String errorColor =
+      '{dart_string(get_str(colors, "error"))}';
+
+  static const bool trayShowOpen =
+      {dart_bool(get_bool(tray, "show_open", True))};
+
+  static const bool trayShowSettings =
+      {dart_bool(get_bool(tray, "show_settings", True))};
+
+  static const bool trayShowAbout =
+      {dart_bool(get_bool(tray, "show_about", True))};
+
+  static const bool trayShowRestart =
+      {dart_bool(get_bool(tray, "show_restart", True))};
+
+  static const bool trayShowExit =
+      {dart_bool(get_bool(tray, "show_exit", True))};
+
+  static const String installerName =
+      '{dart_string(get_str(installer, "name", appname))}';
+
+  static const String installerPublisher =
+      '{dart_string(get_str(installer, "publisher"))}';
+
+  static const String installerDescription =
+      '{dart_string(get_str(installer, "description"))}';
+
+  static const bool desktopShortcut =
+      {dart_bool(get_bool(installer, "desktop_shortcut", True))};
+
+  static const bool startMenuShortcut =
+      {dart_bool(get_bool(installer, "start_menu_shortcut", True))};
+
+  static const String appIcon =
+      '{dart_string(json.dumps(decode_nested(assets.get("app_icon", "")), ensure_ascii=False))}';
+
+  static const String mainLogo =
+      '{dart_string(json.dumps(decode_nested(assets.get("main_logo", "")), ensure_ascii=False))}';
+
+  static const String welcomeLogo =
+      '{dart_string(json.dumps(decode_nested(assets.get("welcome_logo", "")), ensure_ascii=False))}';
+
+  static const String aboutLogo =
+      '{dart_string(json.dumps(decode_nested(assets.get("about_logo", "")), ensure_ascii=False))}';
+
+  static const String trayIcon =
+      '{dart_string(json.dumps(decode_nested(assets.get("tray_icon", "")), ensure_ascii=False))}';
+}}
+"""
+
+    out = (
+        root
+        / "flutter"
+        / "lib"
+        / "generated_client_config.dart"
+    )
+
+    out.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    out.write_text(
+        dart,
+        encoding="utf-8"
+    )
+
+    info(
+        f"Generated Flutter configuration: {out}"
+    )
+
+    return out
+
+
+# ============================================================
+# Rust hbb_common configuration
+# ============================================================
+
+def find_config_rs(root: Path) -> Path | None:
+
+    candidates = [
+        root / "libs" / "hbb_common" / "src" / "config.rs",
+        root / "libs" / "hbb_common" / "src" / "config.rs",
+    ]
+
+    for p in candidates:
+        if p.exists():
+            return p
+
+    # Fallback search.
+    for p in root.glob("libs/**/config.rs"):
+        if "hbb_common" in str(p).lower():
+            return p
+
+    return None
+
+
+def normalize_server(server: str) -> str:
+
+    server = server.strip()
+
+    if not server:
+        return ""
+
+    # Strip protocol accidentally supplied by Laravel.
+    server = re.sub(
+        r"^https?://",
+        "",
+        server,
+        flags=re.IGNORECASE
+    )
+
+    server = server.rstrip("/")
+
+    return server
+
+
+def patch_hbb_config(
+    root: Path,
+    cfg: dict[str, Any]
+) -> None:
+
+    server = normalize_server(
+        get_str(cfg, "server")
+    )
+
+    key = get_str(
+        cfg,
+        "key"
+    ).strip()
+
+    if not server and not key:
+        warn(
+            "No server/key supplied; hbb_common patch skipped."
+        )
+        return
+
+    path = find_config_rs(root)
+
+    if path is None:
+        fail(
+            "libs/hbb_common/src/config.rs was not found. "
+            "RustDesk was probably checked out without submodules."
+        )
+
+    text = path.read_text(
+        encoding="utf-8"
+    )
+
+    original = text
+
+    # --------------------------------------------------------
+    # RENDEZVOUS_SERVERS
+    # --------------------------------------------------------
+
+    if server:
+
+        # Existing single-line form.
+        pattern = (
+            r'pub\s+const\s+RENDEZVOUS_SERVERS\s*:\s*&\[\s*&str\s*\]'
+            r'\s*=\s*&\[[\s\S]*?\];'
+        )
+
+        replacement = (
+            'pub const RENDEZVOUS_SERVERS: &[&str] = '
+            f'&["{server}"];'
+        )
+
+        text, count = re.subn(
+            pattern,
+            replacement,
+            text,
+            count=1
+        )
+
+        if count == 0:
+            fail(
+                "Could not patch RENDEZVOUS_SERVERS in config.rs."
+            )
+
+        info(
+            f"Embedded rendezvous server: {server}"
+        )
+
+    # --------------------------------------------------------
+    # RS_PUB_KEY
+    # --------------------------------------------------------
+
+    if key:
+
+        pattern = (
+            r'pub\s+const\s+RS_PUB_KEY\s*:\s*&str\s*=\s*'
+            r'"[^"]*"\s*;'
+        )
+
+        replacement = (
+            f'pub const RS_PUB_KEY: &str = "{key}";'
+        )
+
+        text, count = re.subn(
+            pattern,
+            replacement,
+            text,
+            count=1
+        )
+
+        if count == 0:
+            fail(
+                "Could not patch RS_PUB_KEY in config.rs."
+            )
+
+        info(
+            "Embedded RustDesk public key."
+        )
+
+    if text == original:
+        fail(
+            "hbb_common/config.rs was not changed."
+        )
+
+    path.write_text(
+        text,
+        encoding="utf-8"
+    )
+
+    # --------------------------------------------------------
+    # Verification
+    # --------------------------------------------------------
+
+    verify = path.read_text(
+        encoding="utf-8"
+    )
+
+    if server and f'"{server}"' not in verify:
+        fail(
+            "Server verification failed after config.rs patch."
+        )
+
+    if key and key not in verify:
+        fail(
+            "Public-key verification failed after config.rs patch."
+        )
+
+    info(
+        f"Verified Rust server/key patch: {path}"
+    )
+
+
+# ============================================================
+# Rust runtime default options
+# ============================================================
+
+def patch_runtime_options(
+    root: Path,
+    cfg: dict[str, Any]
+) -> None:
+
+    """
+    Besides RENDEZVOUS_SERVERS/RS_PUB_KEY, put the API server and
+    custom-rendezvous-server into the built-in RustDesk option map.
+
+    We do this by injecting into Config2::load().
+
+    This is intentionally guarded so it doesn't inject twice.
+    """
+
+    server = normalize_server(
+        get_str(cfg, "server")
+    )
+
+    api = (
+        get_str(cfg, "apiServer")
+        or
+        get_str(cfg, "api_server")
+    )
+
+    key = get_str(
+        cfg,
+        "key"
+    )
+
+    if not server and not api and not key:
+        return
+
+    path = find_config_rs(root)
+
+    if path is None:
+        fail(
+            "config.rs not found while patching runtime options."
+        )
+
+    text = path.read_text(
+        encoding="utf-8"
+    )
+
+    marker = (
+        "/* CLOUD_BUILDER_DEFAULT_OPTIONS */"
+    )
+
+    if marker in text:
+        info(
+            "Rust runtime options already patched."
+        )
+        return
+
+    # --------------------------------------------------------
+    # Find Config2::load().
+    # --------------------------------------------------------
+
+    load_pattern = (
+        r'(impl\s+Config2\s*\{\s*'
+        r'fn\s+load\(\)\s*->\s*Config2\s*\{\s*)'
+    )
+
+    match = re.search(
+        load_pattern,
+        text,
+        flags=re.MULTILINE
+    )
+
+    if not match:
+        warn(
+            "Config2::load() was not found; "
+            "API/custom server runtime injection skipped."
+        )
+        return
+
+    injections = [
+        f'        {marker}\n'
+    ]
+
+    if server:
+        injections.append(
+            '        config.options.insert('
+            '"custom-rendezvous-server".to_string(), '
+            f'"{server}".to_string());\n'
+        )
+
+    if key:
+        injections.append(
+            '        config.options.insert('
+            '"key".to_string(), '
+            f'"{key}".to_string());\n'
+        )
+
+    if api:
+        injections.append(
+            '        config.options.insert('
+            '"api-server".to_string(), '
+            f'"{api}".to_string());\n'
+        )
+
+    injection = "".join(injections)
+
+    pos = match.end()
+
+    text = (
+        text[:pos]
+        + injection
+        + text[pos:]
+    )
+
+    path.write_text(
+        text,
+        encoding="utf-8"
+    )
+
+    info(
+        "Rust runtime default options injected."
+    )
+
+
+# ============================================================
+# Generated JSON
+# ============================================================
+
+def write_json(
     root: Path,
     cfg: dict[str, Any]
 ) -> None:
@@ -426,9 +950,12 @@ def write_json_config(
         exist_ok=True
     )
 
-    output = res / "custom-client-config.json"
+    path = (
+        res /
+        "cloud-client-config.json"
+    )
 
-    output.write_text(
+    path.write_text(
         json.dumps(
             cfg,
             ensure_ascii=False,
@@ -437,709 +964,323 @@ def write_json_config(
         encoding="utf-8"
     )
 
-    info(f"Generated: {output}")
+    info(
+        f"Generated: {path}"
+    )
 
 
 # ============================================================
-# Generated Dart configuration
+# Download assets
 # ============================================================
 
-def make_generated_dart(
+def asset_url(meta: Any) -> str:
+
+    meta = decode_nested(meta)
+
+    if isinstance(meta, str):
+        if meta.startswith("http://") or meta.startswith("https://"):
+            return meta
+        return ""
+
+    if isinstance(meta, dict):
+        return str(
+            meta.get("url")
+            or
+            meta.get("href")
+            or
+            ""
+        )
+
+    return ""
+
+
+def download_assets(
     root: Path,
-    cfg: dict[str, Any],
-    appname: str
-) -> None:
-
-    flutter_lib = root / "flutter" / "lib"
-
-    flutter_lib.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    output = (
-        flutter_lib /
-        "generated_client_config.dart"
-    )
+    cfg: dict[str, Any]
+) -> dict[str, str]:
 
     appearance = as_dict(
         cfg.get("appearance")
     )
 
-    theme = (
-        get_dict(
-            appearance,
-            "theme"
+    assets = as_dict(
+        appearance.get("assets")
+    )
+
+    branding = as_dict(
+        cfg.get("branding")
+    )
+
+    branding_assets = as_dict(
+        branding.get("assets")
+    )
+
+    merged = {}
+
+    merged.update(
+        branding_assets
+    )
+
+    merged.update(
+        assets
+    )
+
+    if not merged:
+        info(
+            "No downloadable branding assets supplied."
         )
-        or
-        as_dict(cfg.get("theme"))
+        return {}
+
+    out = (
+        root
+        / "flutter"
+        / "assets"
+        / "cloud_branding"
     )
 
-    colors = (
-        get_dict(
-            appearance,
-            "colors"
+    out.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    downloaded: dict[str, str] = {}
+
+    for name, meta in merged.items():
+
+        url = asset_url(meta)
+
+        if not url:
+            continue
+
+        parsed = urllib.parse.urlparse(url)
+
+        suffix = (
+            Path(parsed.path).suffix
+            or
+            ".png"
         )
-        or
-        as_dict(cfg.get("colors"))
-    )
 
-    window = (
-        get_dict(
-            appearance,
-            "window"
+        filename = (
+            f"{name}{suffix}"
         )
-        or
-        as_dict(cfg.get("window"))
-    )
 
-    main_screen = (
-        get_dict(
-            appearance,
-            "main_screen"
+        destination = (
+            out /
+            filename
         )
-        or
-        as_dict(cfg.get("main_screen"))
-    )
 
-    branding = (
-        get_dict(
-            appearance,
-            "branding"
-        )
-        or
-        as_dict(cfg.get("branding"))
-    )
-
-    assets = (
-        get_dict(
-            appearance,
-            "assets"
-        )
-        or
-        as_dict(cfg.get("assets"))
-    )
-
-    # --------------------------------------------------------
-    # Theme
-    # --------------------------------------------------------
-
-    mode = str(
-        get_value(
-            theme,
-            "mode",
-            "appearance",
-            default="system"
-        )
-    ).lower()
-
-    if mode not in {
-        "system",
-        "light",
-        "dark",
-    }:
-        mode = "system"
-
-    # --------------------------------------------------------
-    # Window
-    # --------------------------------------------------------
-
-    width = dart_number(
-        get_value(
-            window,
-            "width",
-            "initial_width",
-            "window_width",
-            default=1200
-        ),
-        1200
-    )
-
-    height = dart_number(
-        get_value(
-            window,
-            "height",
-            "initial_height",
-            "window_height",
-            default=800
-        ),
-        800
-    )
-
-    min_width = dart_number(
-        get_value(
-            window,
-            "min_width",
-            "minimum_width",
-            default=500
-        ),
-        500
-    )
-
-    min_height = dart_number(
-        get_value(
-            window,
-            "min_height",
-            "minimum_height",
-            default=400
-        ),
-        400
-    )
-
-    max_width = dart_number(
-        get_value(
-            window,
-            "max_width",
-            "maximum_width",
-            default=0
-        ),
-        0
-    )
-
-    max_height = dart_number(
-        get_value(
-            window,
-            "max_height",
-            "maximum_height",
-            default=0
-        ),
-        0
-    )
-
-    resizable = dart_bool(
-        get_value(
-            window,
-            "resizable",
-            default=True
-        ),
-        True
-    )
-
-    center = dart_bool(
-        get_value(
-            window,
-            "center",
-            "center_window",
-            default=True
-        ),
-        True
-    )
-
-    maximized = dart_bool(
-        get_value(
-            window,
-            "maximized",
-            "start_maximized",
-            default=False
-        ),
-        False
-    )
-
-    always_on_top = dart_bool(
-        get_value(
-            window,
-            "always_on_top",
-            default=False
-        ),
-        False
-    )
-
-    # --------------------------------------------------------
-    # Main screen
-    # --------------------------------------------------------
-
-    show_id = dart_bool(
-        get_value(
-            main_screen,
-            "show_id",
-            "display_id",
-            default=True
-        ),
-        True
-    )
-
-    show_password = dart_bool(
-        get_value(
-            main_screen,
-            "show_password",
-            "display_password",
-            default=True
-        ),
-        True
-    )
-
-    show_connect = dart_bool(
-        get_value(
-            main_screen,
-            "show_connect",
-            "display_connect",
-            default=True
-        ),
-        True
-    )
-
-    show_settings = dart_bool(
-        get_value(
-            main_screen,
-            "show_settings",
-            "display_settings",
-            default=True
-        ),
-        True
-    )
-
-    show_about = dart_bool(
-        get_value(
-            main_screen,
-            "show_about",
-            "display_about",
-            default=True
-        ),
-        True
-    )
-
-    id_label = get_value(
-        main_screen,
-        "id_label",
-        default="ID"
-    )
-
-    password_label = get_value(
-        main_screen,
-        "password_label",
-        default="Password"
-    )
-
-    title = get_value(
-        main_screen,
-        "title",
-        default=""
-    )
-
-    subtitle = get_value(
-        main_screen,
-        "subtitle",
-        default=""
-    )
-
-    welcome_text = get_value(
-        main_screen,
-        "welcome",
-        "welcome_text",
-        default=""
-    )
-
-    # --------------------------------------------------------
-    # Branding
-    # --------------------------------------------------------
-
-    company = get_value(
-        branding,
-        "company",
-        "company_name",
-        default=""
-    )
-
-    description = get_value(
-        branding,
-        "description",
-        default=""
-    )
-
-    website = get_value(
-        branding,
-        "website",
-        default=""
-    )
-
-    copyright_text = get_value(
-        branding,
-        "copyright",
-        default=""
-    )
-
-    email = get_value(
-        branding,
-        "email",
-        default=""
-    )
-
-    # --------------------------------------------------------
-    # Assets
-    # --------------------------------------------------------
-
-    icon_url = get_value(
-        assets,
-        "icon",
-        "icon_url",
-        "iconlink",
-        default=cfg.get("iconlink", "")
-    )
-
-    logo_url = get_value(
-        assets,
-        "logo",
-        "logo_url",
-        "logolink",
-        default=cfg.get("logolink", "")
-    )
-
-    # --------------------------------------------------------
-    # Colors
-    #
-    # Keep raw values because Laravel may use:
-    #
-    # #RRGGBB
-    # #AARRGGBB
-    # 0xFF...
-    # --------------------------------------------------------
-
-    primary = get_value(
-        colors,
-        "primary",
-        "primary_color",
-        "accent",
-        "accent_color",
-        default=""
-    )
-
-    secondary = get_value(
-        colors,
-        "secondary",
-        "secondary_color",
-        default=""
-    )
-
-    background = get_value(
-        colors,
-        "background",
-        "background_color",
-        default=""
-    )
-
-    header = get_value(
-        colors,
-        "header",
-        "header_color",
-        default=""
-    )
-
-    sidebar = get_value(
-        colors,
-        "sidebar",
-        "sidebar_color",
-        default=""
-    )
-
-    button = get_value(
-        colors,
-        "button",
-        "button_color",
-        default=""
-    )
-
-    text_color = get_value(
-        colors,
-        "text",
-        "text_color",
-        default=""
-    )
-
-    hover = get_value(
-        colors,
-        "hover",
-        "hover_color",
-        default=""
-    )
-
-    id_color = get_value(
-        colors,
-        "id",
-        "id_color",
-        default=""
-    )
-
-    # --------------------------------------------------------
-    # Build Dart source
-    # --------------------------------------------------------
-
-    dart = f"""// ============================================================
-// GENERATED FILE
-// DO NOT EDIT MANUALLY
-//
-// Generated by scripts/apply_config.py
-// ============================================================
-
-class GeneratedClientConfig {{
-
-  // ----------------------------------------------------------
-  // Application
-  // ----------------------------------------------------------
-
-  static const String appName = '{dart_string(appname)}';
-
-  static const String server =
-      '{dart_string(cfg.get("server", ""))}';
-
-  static const String key =
-      '{dart_string(cfg.get("key", ""))}';
-
-  static const String apiServer =
-      '{dart_string(cfg.get("apiServer", cfg.get("api_server", "")))}';
-
-  static const String uuid =
-      '{dart_string(cfg.get("uuid", ""))}';
-
-  static const String iconUrl =
-      '{dart_string(icon_url)}';
-
-  static const String logoUrl =
-      '{dart_string(logo_url)}';
-
-
-  // ----------------------------------------------------------
-  // Theme
-  // ----------------------------------------------------------
-
-  static const String themeMode =
-      '{dart_string(mode)}';
-
-
-  // ----------------------------------------------------------
-  // Window
-  // ----------------------------------------------------------
-
-  static const double windowWidth =
-      {width};
-
-  static const double windowHeight =
-      {height};
-
-  static const double minimumWidth =
-      {min_width};
-
-  static const double minimumHeight =
-      {min_height};
-
-  static const double maximumWidth =
-      {max_width};
-
-  static const double maximumHeight =
-      {max_height};
-
-  static const bool resizable =
-      {resizable};
-
-  static const bool centerWindow =
-      {center};
-
-  static const bool startMaximized =
-      {maximized};
-
-  static const bool alwaysOnTop =
-      {always_on_top};
-
-
-  // ----------------------------------------------------------
-  // Main screen
-  // ----------------------------------------------------------
-
-  static const bool showId =
-      {show_id};
-
-  static const bool showPassword =
-      {show_password};
-
-  static const bool showConnect =
-      {show_connect};
-
-  static const bool showSettings =
-      {show_settings};
-
-  static const bool showAbout =
-      {show_about};
-
-  static const String idLabel =
-      '{dart_string(id_label)}';
-
-  static const String passwordLabel =
-      '{dart_string(password_label)}';
-
-  static const String title =
-      '{dart_string(title)}';
-
-  static const String subtitle =
-      '{dart_string(subtitle)}';
-
-  static const String welcomeText =
-      '{dart_string(welcome_text)}';
-
-
-  // ----------------------------------------------------------
-  // Branding
-  // ----------------------------------------------------------
-
-  static const String company =
-      '{dart_string(company)}';
-
-  static const String description =
-      '{dart_string(description)}';
-
-  static const String website =
-      '{dart_string(website)}';
-
-  static const String email =
-      '{dart_string(email)}';
-
-  static const String copyright =
-      '{dart_string(copyright_text)}';
-
-
-  // ----------------------------------------------------------
-  // Colors
-  // ----------------------------------------------------------
-
-  static const String primaryColor =
-      '{dart_string(primary)}';
-
-  static const String secondaryColor =
-      '{dart_string(secondary)}';
-
-  static const String backgroundColor =
-      '{dart_string(background)}';
-
-  static const String headerColor =
-      '{dart_string(header)}';
-
-  static const String sidebarColor =
-      '{dart_string(sidebar)}';
-
-  static const String buttonColor =
-      '{dart_string(button)}';
-
-  static const String textColor =
-      '{dart_string(text_color)}';
-
-  static const String hoverColor =
-      '{dart_string(hover)}';
-
-  static const String idColor =
-      '{dart_string(id_color)}';
-
-
-  // ----------------------------------------------------------
-  // Complete configuration
-  // ----------------------------------------------------------
-
-  static const Map<String, dynamic> raw = {json.dumps(
-      cfg,
-      ensure_ascii=False,
-      indent=2
-  )};
-
-}}
-"""
-
-    output.write_text(
-        dart,
-        encoding="utf-8"
-    )
-
-    info(f"Generated: {output}")
+        try:
+
+            info(
+                f"Downloading asset {name}: {url}"
+            )
+
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent":
+                        "RustDesk-Custom-Builder/1.0"
+                }
+            )
+
+            with urllib.request.urlopen(
+                request,
+                timeout=60
+            ) as response:
+
+                data = response.read()
+
+            if not data:
+                raise RuntimeError(
+                    "Downloaded file is empty."
+                )
+
+            destination.write_bytes(
+                data
+            )
+
+            downloaded[
+                name
+            ] = str(
+                destination.relative_to(root)
+            )
+
+            info(
+                f"Asset downloaded: {destination}"
+            )
+
+        except Exception as exc:
+
+            fail(
+                f"Could not download asset "
+                f"{name}: {exc}"
+            )
+
+    return downloaded
 
 
 # ============================================================
-# Patch helper
+# Windows icon
 # ============================================================
 
-def replace_first(
-    path: Path,
-    pattern: str,
-    replacement: str,
-    description: str,
-    flags: int = 0
+def patch_windows_icon(
+    root: Path,
+    downloaded: dict[str, str]
 ) -> bool:
 
-    if not path.exists():
-        info(
-            f"SKIP {description}: "
-            f"{path} does not exist."
+    relative = (
+        downloaded.get("app_icon")
+    )
+
+    if not relative:
+        return False
+
+    source = (
+        root /
+        relative
+    )
+
+    if not source.exists():
+        return False
+
+    if source.suffix.lower() != ".ico":
+        warn(
+            "app_icon is not an .ico file; "
+            "Windows resource icon was not replaced."
         )
         return False
 
-    text = path.read_text(
-        encoding="utf-8"
+    resources = (
+        root
+        / "flutter"
+        / "windows"
+        / "runner"
+        / "resources"
     )
 
-    new_text, count = re.subn(
-        pattern,
-        replacement,
-        text,
-        count=1,
-        flags=flags
+    resources.mkdir(
+        parents=True,
+        exist_ok=True
     )
 
-    if count == 0:
-        info(
-            f"SKIP {description}: "
-            f"pattern not found."
+    destination = (
+        resources /
+        "app_icon.ico"
+    )
+
+    shutil.copy2(
+        source,
+        destination
+    )
+
+    runner_rc = (
+        root
+        / "flutter"
+        / "windows"
+        / "runner"
+        / "Runner.rc"
+    )
+
+    if runner_rc.exists():
+
+        text = runner_rc.read_text(
+            encoding="utf-8"
         )
-        return False
 
-    path.write_text(
-        new_text,
-        encoding="utf-8"
-    )
+        text = text.replace(
+            "runner_icon.ico",
+            "resources/app_icon.ico"
+        )
+
+        runner_rc.write_text(
+            text,
+            encoding="utf-8"
+        )
 
     info(
-        f"PATCHED {description}"
+        "Windows application icon patched."
     )
 
     return True
 
 
 # ============================================================
-# Application name patch
+# Application name
 # ============================================================
 
 def patch_application_name(
     root: Path,
     appname: str
-) -> None:
+) -> int:
 
     if not appname:
-        return
+        return 0
 
-    # --------------------------------------------------------
-    # Windows runner CMake
-    # --------------------------------------------------------
+    changed = 0
 
-    cmake_candidates = [
-        root / "flutter" / "windows" / "runner" / "CMakeLists.txt",
-        root / "flutter" / "windows" / "runner" / "Runner.rc",
+    candidates = [
+        root
+        / "flutter"
+        / "windows"
+        / "runner"
+        / "Runner.rc",
+
+        root
+        / "flutter"
+        / "windows"
+        / "runner"
+        / "CMakeLists.txt",
+
+        root
+        / "flutter"
+        / "pubspec.yaml",
     ]
 
-    for path in cmake_candidates:
+    for path in candidates:
 
         if not path.exists():
             continue
 
         text = path.read_text(
-            encoding="utf-8"
+            encoding="utf-8",
+            errors="ignore"
         )
 
         original = text
 
-        # Common RustDesk/Flutter product strings.
+        # pubspec name.
+        if path.name == "pubspec.yaml":
+
+            text = re.sub(
+                r"(?m)^name:\s*.*$",
+                f"name: {re.sub(r'[^a-zA-Z0-9_]', '_', appname).lower()}",
+                text,
+                count=1
+            )
+
+        # CMake product name.
         text = re.sub(
-            r'(?i)(PRODUCT_NAME\s+)"[^"]*"',
+            r'(?im)(PRODUCT_NAME\s+)"[^"]*"',
             rf'\1"{appname}"',
             text
         )
 
         text = re.sub(
-            r'(?i)(PRODUCT_DISPLAY_NAME\s+)"[^"]*"',
+            r'(?im)(PRODUCT_DISPLAY_NAME\s+)"[^"]*"',
             rf'\1"{appname}"',
+            text
+        )
+
+        # RC strings.
+        text = re.sub(
+            r'(?im)("FileDescription",\s*")RustDesk(")',
+            rf'\1{appname}\2',
+            text
+        )
+
+        text = re.sub(
+            r'(?im)("ProductName",\s*")RustDesk(")',
+            rf'\1{appname}\2',
             text
         )
 
@@ -1150,386 +1291,423 @@ def patch_application_name(
                 encoding="utf-8"
             )
 
-            info(
-                f"Application name patched: {path}"
-            )
+            changed += 1
+
+    # We intentionally don't globally replace "RustDesk" in every
+    # source file because that can corrupt package names, URLs,
+    # namespaces and Rust identifiers.
+
+    info(
+        f"Application-name resource patches: {changed}"
+    )
+
+    return changed
 
 
 # ============================================================
-# RustDesk configuration
+# Flutter import
 # ============================================================
 
-def patch_rustdesk_configuration(
-    root: Path,
-    cfg: dict[str, Any]
+def ensure_generated_import(
+    root: Path
 ) -> None:
 
-    server = str(
-        cfg.get("server", "")
-        or ""
-    ).strip()
-
-    key = str(
-        cfg.get("key", "")
-        or ""
-    ).strip()
-
-    api = str(
-        cfg.get("apiServer", "")
-        or cfg.get("api_server", "")
-        or ""
-    ).strip()
-
-    # --------------------------------------------------------
-    # custom-client-config.json is already generated.
-    #
-    # We also create a RustDesk-side JSON copy under res.
-    # This is useful for custom builders and does not interfere
-    # with the native RustDesk configuration system.
-    # --------------------------------------------------------
-
-    res = root / "res"
-
-    res.mkdir(
-        parents=True,
-        exist_ok=True
+    main = (
+        root
+        / "flutter"
+        / "lib"
+        / "main.dart"
     )
 
-    rustdesk_cfg = {
-        "server": server,
-        "key": key,
-        "apiServer": api,
-        "appname": cfg.get("appname", ""),
-        "uuid": cfg.get("uuid", ""),
-    }
+    if not main.exists():
+        fail(
+            f"Flutter main.dart not found: {main}"
+        )
 
-    output = (
-        res /
-        "rustdesk-builder-settings.json"
+    text = main.read_text(
+        encoding="utf-8"
     )
 
-    output.write_text(
-        json.dumps(
-            rustdesk_cfg,
-            ensure_ascii=False,
-            indent=2
-        ),
+    if "generated_client_config.dart" in text:
+        return
+
+    imports = list(
+        re.finditer(
+            r"(?m)^import\s+['\"].*?['\"];\s*$",
+            text
+        )
+    )
+
+    line = (
+        "import 'generated_client_config.dart';"
+    )
+
+    if imports:
+
+        pos = imports[-1].end()
+
+        text = (
+            text[:pos]
+            + "\n"
+            + line
+            + text[pos:]
+        )
+
+    else:
+
+        text = line + "\n" + text
+
+    main.write_text(
+        text,
         encoding="utf-8"
     )
 
     info(
-        f"Generated: {output}"
+        "generated_client_config.dart imported into main.dart."
     )
 
 
 # ============================================================
-# Main Flutter integration
+# Flutter startup configuration
 # ============================================================
 
-def patch_flutter_import(
-    root: Path
-) -> None:
+def patch_window_manager(
+    root: Path,
+    cfg: dict[str, Any]
+) -> bool:
 
-    """
-    Ensure generated_client_config.dart is importable.
-
-    We intentionally do not blindly rewrite arbitrary Dart files.
-    The generated file itself is always valid and available.
-
-    If main.dart already imports it, nothing is changed.
-    """
-
-    main_candidates = [
-        root / "flutter" / "lib" / "main.dart",
-    ]
-
-    import_line = (
-        "import 'generated_client_config.dart';"
+    appearance = as_dict(
+        cfg.get("appearance")
     )
 
-    for main in main_candidates:
+    window = as_dict(
+        appearance.get("window")
+    )
 
-        if not main.exists():
-            info(
-                f"main.dart not found: {main}"
-            )
+    if not window:
+        return False
+
+    width = get_int(
+        window,
+        "initial_width",
+        1000
+    )
+
+    height = get_int(
+        window,
+        "initial_height",
+        700
+    )
+
+    min_width = get_int(
+        window,
+        "min_width",
+        800
+    )
+
+    min_height = get_int(
+        window,
+        "min_height",
+        500
+    )
+
+    max_width = get_int(
+        window,
+        "max_width",
+        1600
+    )
+
+    max_height = get_int(
+        window,
+        "max_height",
+        1200
+    )
+
+    resizable = get_bool(
+        window,
+        "resizable",
+        True
+    )
+
+    maximized = get_bool(
+        window,
+        "maximized",
+        False
+    )
+
+    always_on_top = get_bool(
+        window,
+        "always_on_top",
+        False
+    )
+
+    files = list(
+        (root / "flutter" / "lib").rglob(
+            "*.dart"
+        )
+    )
+
+    changed = False
+
+    for path in files:
+
+        text = path.read_text(
+            encoding="utf-8",
+            errors="ignore"
+        )
+
+        if "WindowOptions(" not in text:
             continue
 
-        text = main.read_text(
-            encoding="utf-8"
+        original = text
+
+        # Existing WindowOptions size.
+        text = re.sub(
+            r"minimumSize\s*:\s*const\s*Size\([^)]*\)",
+            (
+                "minimumSize: const Size("
+                f"{min_width}, {min_height})"
+            ),
+            text
         )
 
-        if "generated_client_config.dart" in text:
+        text = re.sub(
+            r"maximumSize\s*:\s*const\s*Size\([^)]*\)",
+            (
+                "maximumSize: const Size("
+                f"{max_width}, {max_height})"
+            ),
+            text
+        )
+
+        text = re.sub(
+            r"size\s*:\s*const\s*Size\([^)]*\)",
+            (
+                "size: const Size("
+                f"{width}, {height})"
+            ),
+            text
+        )
+
+        if (
+            "minimumSize:" not in text
+            or "maximumSize:" not in text
+        ):
+
+            text = text.replace(
+                "WindowOptions(",
+                (
+                    "WindowOptions(\n"
+                    f"    minimumSize: const Size({min_width}, {min_height}),\n"
+                    f"    maximumSize: const Size({max_width}, {max_height}),\n"
+                    f"    size: const Size({width}, {height}),\n"
+                ),
+                1
+            )
+
+        if text != original:
+
+            path.write_text(
+                text,
+                encoding="utf-8"
+            )
+
+            changed = True
+
             info(
-                "generated_client_config.dart "
-                "already imported by main.dart"
-            )
-            return
-
-        # ----------------------------------------------------
-        # Add import after the first import.
-        # ----------------------------------------------------
-
-        match = re.search(
-            r"^import\s+['\"].*?['\"];\s*$",
-            text,
-            flags=re.MULTILINE
-        )
-
-        if match:
-
-            position = match.end()
-
-            text = (
-                text[:position]
-                + "\n"
-                + import_line
-                + text[position:]
+                f"Window configuration patched: "
+                f"{path.relative_to(root)}"
             )
 
-        else:
+            break
 
-            text = (
-                import_line
-                + "\n"
-                + text
-            )
-
-        main.write_text(
-            text,
-            encoding="utf-8"
-        )
-
-        info(
-            f"Added generated config import: {main}"
-        )
-
-        return
+    return changed
 
 
 # ============================================================
-# Optional theme patch
+# Theme patch
 # ============================================================
 
 def patch_theme(
     root: Path,
     cfg: dict[str, Any]
-) -> None:
-
-    """
-    Patch only when the expected RustDesk theme symbols exist.
-
-    We deliberately do NOT fail the entire build when RustDesk changes
-    its internal implementation. The generated configuration remains
-    available to the Flutter application.
-
-    This avoids breaking builds merely because a RustDesk commit moved
-    a theme declaration.
-    """
+) -> bool:
 
     appearance = as_dict(
         cfg.get("appearance")
     )
 
-    theme = (
-        get_dict(
-            appearance,
-            "theme"
-        )
-        or
-        as_dict(cfg.get("theme"))
-    )
-
-    mode = str(
-        get_value(
-            theme,
-            "mode",
-            default="system"
+    theme = str(
+        appearance.get(
+            "theme",
+            "system"
         )
     ).lower()
 
-    if mode not in {
+    if theme not in {
         "system",
         "light",
         "dark",
     }:
-        mode = "system"
+        theme = "system"
 
-    common = (
-        root /
-        "flutter" /
-        "lib" /
-        "common.dart"
+    # We don't perform blind source-wide replacements for ThemeMode.
+    # Instead, generated_client_config.dart is imported and the build
+    # verifies that MaterialApp/theme code exists.
+    #
+    # This avoids corrupting RustDesk's Theme implementation when
+    # upstream changes it.
+
+    files = list(
+        (root / "flutter" / "lib").rglob(
+            "*.dart"
+        )
     )
+
+    material_files = []
+
+    for path in files:
+
+        try:
+            text = path.read_text(
+                encoding="utf-8",
+                errors="ignore"
+            )
+        except Exception:
+            continue
+
+        if (
+            "MaterialApp" in text
+            or
+            "ThemeMode" in text
+        ):
+            material_files.append(
+                path
+            )
+
+    if not material_files:
+
+        fail(
+            "Could not find Flutter MaterialApp/ThemeMode "
+            "implementation. Theme patch cannot be verified."
+        )
+
+    info(
+        f"Flutter theme implementation found "
+        f"({len(material_files)} files); requested theme={theme}"
+    )
+
+    return True
+
+
+# ============================================================
+# Verification
+# ============================================================
+
+def verify(
+    root: Path,
+    cfg: dict[str, Any]
+) -> None:
+
+    # --------------------------------------------------------
+    # Generated Flutter config
+    # --------------------------------------------------------
+
+    generated = (
+        root
+        / "flutter"
+        / "lib"
+        / "generated_client_config.dart"
+    )
+
+    if not generated.exists():
+        fail(
+            "generated_client_config.dart was not generated."
+        )
+
+    text = generated.read_text(
+        encoding="utf-8"
+    )
+
+    server = get_str(
+        cfg,
+        "server"
+    )
+
+    key = get_str(
+        cfg,
+        "key"
+    )
+
+    if server and server not in text:
+        fail(
+            "Generated Flutter config does not contain server."
+        )
+
+    if key and key not in text:
+        fail(
+            "Generated Flutter config does not contain key."
+        )
+
+    # --------------------------------------------------------
+    # Rust config
+    # --------------------------------------------------------
+
+    if server or key:
+
+        path = find_config_rs(root)
+
+        if path is None:
+            fail(
+                "Cannot verify config.rs because it is missing."
+            )
+
+        rust = path.read_text(
+            encoding="utf-8"
+        )
+
+        if server and f'"{normalize_server(server)}"' not in rust:
+            fail(
+                "Final verification: server is not embedded "
+                "in hbb_common/config.rs."
+            )
+
+        if key and key not in rust:
+            fail(
+                "Final verification: public key is not embedded "
+                "in hbb_common/config.rs."
+            )
+
+    # --------------------------------------------------------
+    # main.dart import
+    # --------------------------------------------------------
 
     main = (
-        root /
-        "flutter" /
-        "lib" /
-        "main.dart"
+        root
+        / "flutter"
+        / "lib"
+        / "main.dart"
     )
 
-    # --------------------------------------------------------
-    # We only inspect and report here.
-    #
-    # The actual RustDesk theme API changes frequently.
-    # Hard replacing arbitrary theme code is unsafe.
-    # --------------------------------------------------------
-
-    if common.exists():
-
-        text = common.read_text(
-            encoding="utf-8"
-        )
-
-        if "MyTheme" in text:
-
-            info(
-                f"RustDesk theme implementation detected "
-                f"(requested mode: {mode})"
-            )
-
-        else:
-
-            info(
-                "RustDesk MyTheme symbol not detected."
-            )
-
-    if main.exists():
-
-        text = main.read_text(
-            encoding="utf-8"
-        )
-
-        if "window_manager" in text:
-
-            info(
-                "RustDesk window_manager detected."
-            )
-
-
-# ============================================================
-# Window configuration
-# ============================================================
-
-def generate_window_settings(
-    root: Path,
-    cfg: dict[str, Any]
-) -> None:
-
-    appearance = as_dict(
-        cfg.get("appearance")
-    )
-
-    window = (
-        get_dict(
-            appearance,
-            "window"
-        )
-        or
-        as_dict(cfg.get("window"))
-    )
-
-    if not window:
-        return
-
-    res = root / "res"
-
-    res.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    output = (
-        res /
-        "rustdesk-window-config.json"
-    )
-
-    output.write_text(
-        json.dumps(
-            window,
-            ensure_ascii=False,
-            indent=2
-        ),
+    main_text = main.read_text(
         encoding="utf-8"
     )
 
+    if "generated_client_config.dart" not in main_text:
+        fail(
+            "generated_client_config.dart is not imported by main.dart."
+        )
+
     info(
-        f"Generated: {output}"
-    )
-
-
-# ============================================================
-# Branding configuration
-# ============================================================
-
-def generate_branding_settings(
-    root: Path,
-    cfg: dict[str, Any]
-) -> None:
-
-    appearance = as_dict(
-        cfg.get("appearance")
-    )
-
-    branding = (
-        get_dict(
-            appearance,
-            "branding"
-        )
-        or
-        as_dict(cfg.get("branding"))
-    )
-
-    assets = (
-        get_dict(
-            appearance,
-            "assets"
-        )
-        or
-        as_dict(cfg.get("assets"))
-    )
-
-    data = {
-        "branding": branding,
-        "assets": assets,
-        "appname": cfg.get(
-            "appname",
-            ""
-        ),
-        "iconlink": cfg.get(
-            "iconlink",
-            ""
-        ),
-        "logolink": cfg.get(
-            "logolink",
-            ""
-        ),
-    }
-
-    res = root / "res"
-
-    res.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    output = (
-        res /
-        "rustdesk-branding.json"
-    )
-
-    output.write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
+        "=============================================="
     )
 
     info(
-        f"Generated: {output}"
+        "FINAL CONFIGURATION VERIFICATION PASSED"
+    )
+
+    info(
+        "=============================================="
     )
 
 
@@ -1537,173 +1715,59 @@ def generate_branding_settings(
 # Main
 # ============================================================
 
-def make_config(
-    root: Path,
-    cfg: dict[str, Any],
-    appname: str
-) -> None:
+def main() -> None:
 
-    root = root.resolve()
-
-    if not root.exists():
-        die(
-            f"RustDesk directory does not exist: {root}"
-        )
-
-    info(
-        f"RustDesk root: {root}"
-    )
-
-    # --------------------------------------------------------
-    # Normalize configuration.
-    # This is where the original AttributeError is fixed.
-    # --------------------------------------------------------
-
-    cfg = parse_json_value(cfg)
-
-    if not isinstance(cfg, dict):
-        die(
-            "Configuration root is not a JSON object."
-        )
-
-    # --------------------------------------------------------
-    # Write complete JSON
-    # --------------------------------------------------------
-
-    write_json_config(
-        root,
-        cfg
-    )
-
-    # --------------------------------------------------------
-    # Generated Dart configuration
-    # --------------------------------------------------------
-
-    make_generated_dart(
-        root,
-        cfg,
-        appname
-    )
-
-    # --------------------------------------------------------
-    # RustDesk settings
-    # --------------------------------------------------------
-
-    patch_rustdesk_configuration(
-        root,
-        cfg
-    )
-
-    # --------------------------------------------------------
-    # Window settings
-    # --------------------------------------------------------
-
-    generate_window_settings(
-        root,
-        cfg
-    )
-
-    # --------------------------------------------------------
-    # Branding
-    # --------------------------------------------------------
-
-    generate_branding_settings(
-        root,
-        cfg
-    )
-
-    # --------------------------------------------------------
-    # Application name
-    # --------------------------------------------------------
-
-    patch_application_name(
-        root,
-        appname
-    )
-
-    # --------------------------------------------------------
-    # Ensure generated config can be imported.
-    # --------------------------------------------------------
-
-    patch_flutter_import(
-        root
-    )
-
-    # --------------------------------------------------------
-    # Theme detection
-    # --------------------------------------------------------
-
-    patch_theme(
-        root,
-        cfg
-    )
-
-    info(
-        "Configuration patching completed."
-    )
-
-
-# ============================================================
-# CLI
-# ============================================================
-
-def build_parser() -> argparse.ArgumentParser:
-
-    parser = argparse.ArgumentParser(
-        description=(
-            "Apply Laravel configuration "
-            "to a RustDesk Windows client."
-        )
-    )
+    parser = argparse.ArgumentParser()
 
     parser.add_argument(
         "--rustdesk",
-        required=True,
-        help="Path to RustDesk source tree."
+        required=True
     )
 
     parser.add_argument(
         "--server",
-        default="",
-        help="RustDesk ID/Relay server."
+        default=""
     )
 
     parser.add_argument(
         "--key",
-        default="",
-        help="RustDesk public key."
+        default=""
     )
 
     parser.add_argument(
         "--api",
-        default="",
-        help="API server."
+        default=""
     )
 
     parser.add_argument(
         "--appname",
-        default="RustDesk",
-        help="Application name."
+        default=""
     )
 
     parser.add_argument(
         "--filename",
-        default="RustDesk.exe",
-        help="Final executable filename."
+        default=""
+    )
+
+    parser.add_argument(
+        "--uuid",
+        default=""
+    )
+
+    parser.add_argument(
+        "--iconlink",
+        default=""
+    )
+
+    parser.add_argument(
+        "--logolink",
+        default=""
     )
 
     parser.add_argument(
         "--extras",
-        default="",
-        help="Complete Laravel JSON configuration."
+        default=""
     )
-
-    return parser
-
-
-def main() -> None:
-
-    parser = build_parser()
 
     args = parser.parse_args()
 
@@ -1711,49 +1775,173 @@ def main() -> None:
         args.rustdesk
     ).resolve()
 
-    # --------------------------------------------------------
-    # Load extras
-    # --------------------------------------------------------
+    if not root.exists():
+        fail(
+            f"RustDesk directory does not exist: {root}"
+        )
 
-    cfg = load_extras(
+    info(
+        f"RustDesk source: {root}"
+    )
+
+    extras = load_extras(
         args.extras
     )
 
-    # --------------------------------------------------------
-    # Normalize ALL nested JSON strings.
-    # --------------------------------------------------------
-
     cfg = normalize_config(
-        cfg,
+        extras,
         args
     )
 
     # --------------------------------------------------------
-    # Ensure application name exists.
+    # app name fallback
     # --------------------------------------------------------
 
+    branding = as_dict(
+        cfg.get("branding")
+    )
+
     appname = (
-        args.appname
-        or cfg.get("appname")
-        or "RustDesk"
+        get_str(cfg, "appname")
+        or
+        get_str(branding, "app_name")
+        or
+        "RustDesk"
     )
 
     cfg["appname"] = appname
 
     # --------------------------------------------------------
-    # Execute
+    # Output complete config
     # --------------------------------------------------------
 
-    make_config(
+    write_json(
         root,
-        cfg,
+        cfg
+    )
+
+    # --------------------------------------------------------
+    # Generate Flutter config
+    # --------------------------------------------------------
+
+    generate_flutter_config(
+        root,
+        cfg
+    )
+
+    # --------------------------------------------------------
+    # Download assets
+    # --------------------------------------------------------
+
+    downloaded = download_assets(
+        root,
+        cfg
+    )
+
+    # --------------------------------------------------------
+    # Patch Rust networking
+    # --------------------------------------------------------
+
+    patch_hbb_config(
+        root,
+        cfg
+    )
+
+    patch_runtime_options(
+        root,
+        cfg
+    )
+
+    # --------------------------------------------------------
+    # Patch Windows / application
+    # --------------------------------------------------------
+
+    patch_application_name(
+        root,
         appname
     )
 
+    patch_windows_icon(
+        root,
+        downloaded
+    )
 
-# ============================================================
-# Entry point
-# ============================================================
+    # --------------------------------------------------------
+    # Flutter integration
+    # --------------------------------------------------------
+
+    ensure_generated_import(
+        root
+    )
+
+    window_ok = patch_window_manager(
+        root,
+        cfg
+    )
+
+    if not window_ok:
+
+        appearance = as_dict(
+            cfg.get("appearance")
+        )
+
+        if as_dict(
+            appearance.get("window")
+        ):
+            fail(
+                "Window settings were supplied by Laravel, "
+                "but no WindowOptions block was found in Flutter."
+            )
+
+    patch_theme(
+        root,
+        cfg
+    )
+
+    # --------------------------------------------------------
+    # Final verification
+    # --------------------------------------------------------
+
+    verify(
+        root,
+        cfg
+    )
+
+    # --------------------------------------------------------
+    # Manifest
+    # --------------------------------------------------------
+
+    manifest = {
+        "appname": appname,
+        "server": get_str(cfg, "server"),
+        "key_present": bool(
+            get_str(cfg, "key")
+        ),
+        "apiServer": (
+            get_str(cfg, "apiServer")
+            or
+            get_str(cfg, "api_server")
+        ),
+        "uuid": get_str(cfg, "uuid"),
+        "downloaded_assets": downloaded,
+    }
+
+    (
+        root
+        / ".cloud-builder.json"
+    ).write_text(
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            indent=2
+        ),
+        encoding="utf-8"
+    )
+
+    info(
+        "RustDesk custom configuration applied successfully."
+    )
+
 
 if __name__ == "__main__":
 
@@ -1761,31 +1949,12 @@ if __name__ == "__main__":
         main()
 
     except KeyboardInterrupt:
-
-        die(
-            "Interrupted by user.",
-            code=130
-        )
+        fail("Interrupted.")
 
     except SystemExit:
-
         raise
 
     except Exception as exc:
-
-        print(
-            "",
-            file=sys.stderr
+        fail(
+            f"{type(exc).__name__}: {exc}"
         )
-
-        print(
-            "[patcher] UNEXPECTED ERROR:",
-            file=sys.stderr
-        )
-
-        print(
-            str(exc),
-            file=sys.stderr
-        )
-
-        raise
